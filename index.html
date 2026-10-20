@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Balloon Inspector — 도면 검사 기준서 작성 자동화</title>
+  <meta name="description" content="PDF 도면(벡터)의 치수·공차·기하공차·용접 표기를 인식해 번호 풍선을 자동으로 달고, 풍선이 이미 있는 도면에서는 풍선별 정보를 엑셀로 뽑고, 정답과 대조해 일치율을 재는 브라우저 도구">
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2313274b'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23ff8f8f' stroke-width='2.5'/%3E%3Cpath d='M14 12l3-1.5V21' stroke='%23fff' stroke-width='2.4' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
+  <div class="shell">
+    <aside class="sidebar" id="sidebar" aria-label="메뉴">
+      <a class="side-brand" href="#/home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="10" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M14 11.5l3-1.5V22" stroke="currentColor" stroke-width="2.4" fill="none"/></svg>
+        </span>
+        <span class="brand-text">Balloon Inspector<small>검사 기준서 작성 자동화</small></span>
+      </a>
+      <nav class="side-nav" id="nav" aria-label="주 메뉴">
+        <a href="#/home" data-route="home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg><span>대시보드</span></a>
+        <a href="#/drawing" data-route="drawing"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h3M9 17h7"/></svg><span>도면 열기·인식</span></a>
+        <a href="#/balloon" data-route="balloon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="9" r="5"/><path d="M8 7.5 9.5 7v4M13 13l6 6"/></svg><span>목표 1 · 풍선 배치</span></a>
+        <a href="#/extract" data-route="extract"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="7" r="4"/><path d="M10 10l4 4M14 14h6M14 18h6M14 10h6"/></svg><span>목표 2 · 풍선 읽기</span></a>
+        <a href="#/accuracy" data-route="accuracy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M6 16l4-5 3 3 5-7"/><circle cx="18" cy="7" r="1.2"/></svg><span>일치율 측정</span></a>
+      </nav>
+      <div class="side-bottom">
+        <nav aria-label="설정 메뉴"><a class="side-set" href="#/settings" data-route="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg><span>설정</span></a></nav>
+        <a class="side-ai" href="#/accuracy"><span class="ai-dot" aria-hidden="true">%</span><span>정답과 대조해<br>일치율부터 잽니다</span></a>
+      </div>
+    </aside>
+    <div class="side-backdrop" id="sideBackdrop" hidden></div>
+
+    <div class="content">
+      <header class="topbar">
+        <button type="button" class="menu-btn" id="menuBtn" aria-controls="sidebar" aria-expanded="false" aria-label="메뉴 열기">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <a class="top-title" href="#/home">
+          <span class="top-name">Balloon Inspector</span>
+          <span class="top-sub">PDF 도면 번호 풍선 자동 배치 · 풍선별 정보 엑셀 추출 · 일치율 측정</span>
+        </a>
+        <div class="top-user">
+          <svg class="avatar" viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="19" fill="#e6ebf2"/><circle cx="20" cy="15.5" r="6.5" fill="#1b2a44"/><path d="M8 32c2-6 7-9 12-9s10 3 12 9" fill="#1b2a44"/></svg>
+          <span class="user-text"><span>품질경영팀 <span class="bar-sep" aria-hidden="true">|</span> 황수용</span><span id="docText" class="now"></span></span>
+        </div>
+      </header>
+
+      <div id="sampleBanner" class="sample-banner" hidden>지금 열린 것은 <strong>예시 도면(가상)</strong>입니다. 품번·치수는 모두 지어낸 값입니다.</div>
+      <div id="storeBanner" class="store-banner" hidden>이 브라우저에서는 저장소를 쓸 수 없어, 창을 닫으면 고친 내용이 사라집니다. 설정에서 JSON 백업을 받아 두세요.</div>
+
+      <main id="main" class="inner main" tabindex="-1"></main>
+
+      <footer class="site-footer">
+        <div class="inner">1단계 시연판 · 도면 PDF 는 서버로 보내지 않고 이 브라우저 안에서만 읽고 저장합니다 · 벡터(글자 층이 있는) PDF 만 읽습니다</div>
+      </footer>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog id="dialog" class="dialog">
+    <form method="dialog" class="dialog-body" id="dialogForm">
+      <h2 id="dialogTitle"></h2>
+      <div id="dialogContent"></div>
+      <div class="dialog-actions" id="dialogActions"></div>
+    </form>
+  </dialog>
+
+  <!-- 로컬 파일(file://)로 열어도 돌도록 module 이 아닌 일반 스크립트로 불러옵니다. pdf.js 는 처음 필요할 때 불러옵니다(app.js) -->
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="js/logic.js"></script>
+  <script src="js/flow.js"></script>
+  <script src="js/sample-pdfs.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/ai-endpoint.js"></script>
+  <script src="js/ai-panel.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
