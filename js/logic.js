@@ -55,11 +55,23 @@
     var ex = x + c * w, ey = y + s * w, top = 0.8 * h, bot = 0.22 * h;
     return boxOfPts([[x - ux * bot, y - uy * bot], [x + ux * top, y + uy * top], [ex - ux * bot, ey - uy * bot], [ex + ux * top, ey + uy * top]]);
   }
+  /* 자간을 넓힌 글: CAD 가 글자 사이에 빈칸을 넣어 「4 6 2」 「2 7 , 5」 「± 1」 처럼 내보냄 → 한 글자씩 띄운 글은 빈칸을 뺌.
+     (낱말 사이 빈칸도 함께 빠지지만 이런 글은 대부분 숫자 · 짧은 표기이고, 주기 문장 대조는 띄어쓰기를 보지 않음) */
+  function unspace(s) {
+    var t = String(s).replace(/^\s+|\s+$/g, '');
+    return /^\S( \S)+$/.test(t) ? t.replace(/ /g, '') : s;
+  }
+  /* 글자 층 숫자의 대문자 높이(글자 크기의 0.72) 가운데값 — 선 기호 크기의 잣대 */
+  function textCap(items) {
+    var hs = (items || []).filter(function (it) { return /\d/.test(it.str) && it.str.length <= 12; }).map(function (it) { return it.h; }).sort(function (a, b) { return a - b; });
+    return hs.length ? 0.72 * hs[Math.floor(hs.length / 2)] : null;
+  }
   function pdfTextItems(items, vt, page) {
     var out = [];
     (items || []).forEach(function (it, i) {
       var s = it.str == null ? '' : String(it.str);
       if (!s.trim()) return;
+      s = unspace(s);
       var m = mul(vt, it.transform);
       var h = Math.sqrt(m[2] * m[2] + m[3] * m[3]) || Math.abs(it.height) || 1;
       var a = Math.atan2(m[1], m[0]);
@@ -140,10 +152,12 @@
   }
 
   /* ── 3. 원(풍선)·용접 삼각형 찾기 ───────────────────────────── */
-  function findCircles(subpaths) {
+  /* poly = true 면 곡선 없이 점이 많은 꺾은선 원도(품번 풍선을 꺾은선으로 그린 도면 — 3차, 「원 안 번호」 판정에만 씀) */
+  function findCircles(subpaths, poly) {
     var out = [];
     subpaths.forEach(function (sp) {
-      if (sp.curves < 3 || sp.pts.length < 12) return;
+      if (sp.curves < 3 && !(poly && !sp.curves && sp.pts.length >= 16)) return;
+      if (sp.pts.length < 12) return;
       var p = sp.pts, n = p.length, cx = 0, cy = 0;
       var closedish = sp.closed || dist(p[0][0], p[0][1], p[n - 1][0], p[n - 1][1]) < 1;
       if (!closedish) return;
@@ -182,9 +196,13 @@
 
   /* 선으로 그린 용접 기호(ISO 2553): 기준선(실선) + 바로 옆 점선(식별선). 실선 하나에 짧은 평행 선분이 4개 이상 1~4pt 옆에 늘어서면 기준선으로 봅니다.
      기준선에 한 끝이 닿고 옆으로 솟은 선(필릿 삼각형 · 개선 기호 등)을 기호로 모읍니다. 반환 [{ x1,y1,x2,y2, a, L, dash(점선 쪽 +1/-1), syms:[{side, box}] }] */
-  function findWeldRefs(segs) {
+  function findWeldRefs(segs, curved) {
     segs = segs || [];
     var near = gridIndex(segs, segBox, 30), refs = [];
+    // 곡선 기호(J · 플레어 · 둥근 마감)는 곧은 선이 아니라 segs 에 없음 → 작은 곡선 경로의 양 끝을 이은 줄을 기호 선으로도 봄(3차)
+    var chords = (curved || []).filter(function (sp) { var b = boxOfPts(sp.pts); return sp.curves && Math.max(b.x1 - b.x0, b.y1 - b.y0) < 30 && !sp.closed; })
+      .map(function (sp) { var a = sp.pts[0], z = sp.pts[sp.pts.length - 1]; return { x1: a[0], y1: a[1], x2: z[0], y2: z[1], curve: true }; });
+    var nearCh = gridIndex(chords, segBox, 30);
     segs.forEach(function (S) {
       var L = dist(S.x1, S.y1, S.x2, S.y2);
       if (L < 20 || L > 400) return;
@@ -203,23 +221,47 @@
       var side = dashes['1'] >= 4 ? 1 : dashes['-1'] >= 4 ? -1 : 0;
       if (!side) return;
       if (refs.some(function (r) { return Math.abs(r.a - a) < 0.05 && Math.abs(r.v - v) < 0.6 && Math.min(r.u1, u1) - Math.max(r.u0, u0) > 0.5 * L; })) return;
-      refs.push({ x1: S.x1, y1: S.y1, x2: S.x2, y2: S.y2, a: a, L: L, u0: u0, u1: u1, v: v, dash: side });
+      // 화살표 · 꼬리: 기준선 한쪽 끝에 비스듬히(직각 · 나란함이 아님) 이어진 선이 있는가 — 숨은선(점선)이 나란히 붙은 긴 외형선과 가름(3차)
+      var tip = [[S.x1, S.y1], [S.x2, S.y2]].some(function (e) {
+        return near(e[0] - 1.5, e[1] - 1.5, e[0] + 1.5, e[1] + 1.5).some(function (o) {
+          if (o === S || (dist(o.x1, o.y1, e[0], e[1]) > 1.2 && dist(o.x2, o.y2, e[0], e[1]) > 1.2)) return false;
+          var sn = Math.abs(Math.sin(Math.atan2(o.y2 - o.y1, o.x2 - o.x1) - a));
+          return sn > 0.25 && sn < 0.97 && dist(o.x1, o.y1, o.x2, o.y2) > 3;
+        });
+      });
+      refs.push({ x1: S.x1, y1: S.y1, x2: S.x2, y2: S.y2, a: a, L: L, u0: u0, u1: u1, v: v, dash: side, tip: tip });
     });
     // 기호: 기준선에 닿고(0.8pt 안) 옆으로 2~25pt 솟은 선. 양 끝 1.5pt 안(화살표 · 꼬리)은 뺌
     refs.forEach(function (r) {
       var touch = [];
-      near(Math.min(r.x1, r.x2) - 25, Math.min(r.y1, r.y2) - 25, Math.max(r.x1, r.x2) + 25, Math.max(r.y1, r.y2) + 25).forEach(function (o) {
+      var qb = [Math.min(r.x1, r.x2) - 25, Math.min(r.y1, r.y2) - 25, Math.max(r.x1, r.x2) + 25, Math.max(r.y1, r.y2) + 25];
+      near(qb[0], qb[1], qb[2], qb[3]).concat(nearCh(qb[0], qb[1], qb[2], qb[3])).forEach(function (o) {
         var A = local(o.x1, o.y1, r.a), B = local(o.x2, o.y2, r.a), dA = A[1] - r.v, dB = B[1] - r.v;
         var on = Math.abs(dA) < 0.8 ? A : Math.abs(dB) < 0.8 ? B : null, off = on === A ? B : A, doff = off[1] - r.v;
         if (!on || Math.abs(doff) < 2 || Math.abs(doff) > 25) return;
         if (on[0] < r.u0 + 1.5 || on[0] > r.u1 - 1.5) return;
         if (Math.abs(doff) < 4.6 && Math.abs(off[0] - on[0]) < 0.5) return; // 점선과 실선 사이 짧은 막대
-        touch.push({ u: (on[0] + off[0]) / 2, u0: Math.min(on[0], off[0]), u1: Math.max(on[0], off[0]), side: doff > 0 ? 1 : -1, ext: Math.abs(doff) });
+        touch.push({ u: (on[0] + off[0]) / 2, u0: Math.min(on[0], off[0]), u1: Math.max(on[0], off[0]), side: doff > 0 ? 1 : -1, ext: Math.abs(doff), seg: o });
       });
       var groups = [];
       touch.sort(function (p, q) { return p.u - q.u; }).forEach(function (t) {
-        var g = groups.filter(function (x) { return x.side === t.side && t.u0 - x.u1 < 4; })[0];
-        if (g) { g.u0 = Math.min(g.u0, t.u0); g.u1 = Math.max(g.u1, t.u1); g.ext = Math.max(g.ext, t.ext); g.n++; } else groups.push({ side: t.side, u0: t.u0, u1: t.u1, ext: t.ext, n: 1 });
+        // 같은 기호의 선끼리 묶기: 4pt 또는 솟은 높이의 60% 안(플러그 · 슬롯 기호는 두 세로선이 떨어져 있음 — 3차)
+        var g = groups.filter(function (x) { return x.side === t.side && t.u0 - x.u1 < Math.max(4, 0.6 * Math.min(x.ext, t.ext)); })[0];
+        if (g) { g.u0 = Math.min(g.u0, t.u0); g.u1 = Math.max(g.u1, t.u1); g.ext = Math.max(g.ext, t.ext); g.n++; } else groups.push({ side: t.side, u0: t.u0, u1: t.u1, ext: t.ext, n: 1, seg: t.seg });
+      });
+      // 선 하나만 닿아도 그 선 중간에 다른 선(J · 플레어의 호)이 붙어 있으면 기호(3차)
+      groups.forEach(function (g) {
+        if (g.n !== 1 || !g.seg) return;
+        var S = g.seg, bb = pad(segBox(S), 0.8);
+        var att = near(bb.x0, bb.y0, bb.x1, bb.y1).concat(nearCh(bb.x0, bb.y0, bb.x1, bb.y1)).some(function (o) {
+          if (o === S || (o.x1 === S.x1 && o.y1 === S.y1 && o.x2 === S.x2 && o.y2 === S.y2)) return false;
+          var A = local(o.x1, o.y1, r.a), B = local(o.x2, o.y2, r.a);
+          if (Math.abs(A[1] - r.v) < 5 && Math.abs(B[1] - r.v) < 5 && Math.abs(A[1] - B[1]) < 0.5) return false; // 기준선 · 점선(기준선과 나란한 가까운 선)
+          var so = Math.atan2(o.y2 - o.y1, o.x2 - o.x1), ss = Math.atan2(S.y2 - S.y1, S.x2 - S.x1);
+          if (Math.abs(Math.sin(so - ss)) < 0.12) return false; // 같은 방향으로 이어지는 토막(가운데서 나뉜 지시선)은 붙은 선이 아님
+          return [[o.x1, o.y1], [o.x2, o.y2]].some(function (e) { var q = local(e[0], e[1], r.a), dv = (q[1] - r.v) * g.side; return dv > 1 && dv < g.ext + 0.5 && ptSegDist(e[0], e[1], S) < 0.6; });
+        });
+        if (att && r.tip) g.n = 2;
       });
       // 기호는 선 둘 이상(삼각형 두 변 · V · 네모 …)이 닿고, 폭 30pt 안. 선 하나만 닿는 것은 도면 선이 지나가는 것
       r.syms = groups.filter(function (g) { return g.n >= 2 && g.u1 - g.u0 <= 30 && g.ext >= 3; }).map(function (g) {
@@ -228,11 +270,11 @@
         return { side: g.side, u0: g.u0, u1: g.u1, ext: g.ext, box: boxOfPts(pts) };
       });
     });
-    return refs.filter(function (r) { return r.syms.length; });
+    return refs.filter(function (r) { return r.syms.length && r.tip; });
   }
 
   /* ── 4. 글자 조각 → 토큰 ──────────────────────────────────── */
-  var GDT = { '⏥': '평면도', '▱': '평면도', '⌭': '원통도', '○': '진원도', '⌒': '선의 윤곽도', '⌓': '면의 윤곽도', '∥': '평행도', '⫽': '평행도',
+  var GDT = { '⏤': '진직도', '⏥': '평면도', '▱': '평면도', '⌭': '원통도', '○': '진원도', '⌒': '선의 윤곽도', '⌓': '면의 윤곽도', '∥': '평행도', '⫽': '평행도',
     '⊥': '직각도', '⟂': '직각도', '∠': '경사도', '⌖': '위치도', '⊕': '위치도', '◎': '동심도', '⌯': '대칭도', '↗': '원주 흔들림', '⌰': '온 흔들림' };
   function gdtSym(s) { var c = str(s).charAt(0); return GDT[c] ? c : (/^\/\//.test(str(s)) ? '∥' : ''); }
   function local(x, y, a) { var c = Math.cos(a), s = Math.sin(a); return [x * c + y * s, -x * s + y * c]; }
@@ -349,7 +391,7 @@
       if (!ok) return;
       nx.dead = true; t.str = t.str + ' ' + nx.str; t.box = union(t.box, nx.box); t.u1 = Math.max(t.u1, nx.u1); t.parts = t.parts.concat(nx.parts); t.cx = (t.box.x0 + t.box.x1) / 2; t.cy = (t.box.y0 + t.box.y1) / 2;
     });
-    return toks.filter(function (t) { return !t.dead; }).map(function (t) { delete t.dead; delete t.solo; return t; });
+    return toks.filter(function (t) { return !t.dead; }).map(function (t) { if (t.solo) t.circled = true; delete t.dead; delete t.solo; return t; });
   }
 
   /* ── 4-1. 윤곽선 글자 읽기(글자 층 없는 PDF) ────────────────
@@ -561,23 +603,257 @@
     return { items: items, used: used, pageCap: pageCap };
   }
 
+  /* ── 4-3. 한 줄 선 글꼴(스트로크 글꼴) 읽기 ────────────────
+     CAD 의 선 글꼴(회색 · 파란 글, 「M」 「Φ」 처럼 글자 층 옆에 그은 글자)은 칠한 윤곽이 아니라 「선을 그어」 글자를 만듭니다.
+     ① 작은 선 토막을 겹치는 것끼리 글자 하나로 묶고 ② 선을 펜 두께(대문자 높이의 13%)로 굵게 칠해 16×16 격자로 만들어
+     ③ 윤곽선 글자와 같은 참조 글자표(산세리프)와 모양을 맞춥니다. 구멍 수는 칠한 격자에서 바깥과 이어지지 않은 빈 곳을 세어 봅니다.
+     ④ 글자 층 글 바로 앞 · 뒤에 붙은 한 글자는 그 글에 붙이고(「M」+「20」, 「Φ」+「71」),
+     ⑤ 같은 크기 글자가 한 줄로 둘 이상 늘어서면 새 글 조각으로 냅니다(선 글꼴로만 쓴 치수 · 각장 · 부기). */
+  function subSegs(sp) {
+    var q = dedupePts(sp.pts), o = [];
+    for (var i = 1; i < q.length; i++) o.push([q[i - 1][0], q[i - 1][1], q[i][0], q[i][1]]);
+    if (sp.closed && q.length > 2) o.push([q[q.length - 1][0], q[q.length - 1][1], q[0][0], q[0][1]]);
+    if (!o.length && q.length) o.push([q[0][0], q[0][1], q[0][0], q[0][1]]);
+    return o;
+  }
+  function countHoles(f, N) {
+    var lab = new Uint8Array(N * N), holes = 0, st = [];
+    for (var s0 = 0; s0 < N * N; s0++) {
+      if (f[s0] || lab[s0]) continue;
+      var size = 0, edge = false; st.push(s0); lab[s0] = 1;
+      while (st.length) {
+        var c = st.pop(), x = c % N, y = (c - x) / N; size++;
+        if (!x || !y || x === N - 1 || y === N - 1) edge = true;
+        if (x > 0 && !f[c - 1] && !lab[c - 1]) { lab[c - 1] = 1; st.push(c - 1); }
+        if (x < N - 1 && !f[c + 1] && !lab[c + 1]) { lab[c + 1] = 1; st.push(c + 1); }
+        if (y > 0 && !f[c - N] && !lab[c - N]) { lab[c - N] = 1; st.push(c - N); }
+        if (y < N - 1 && !f[c + N] && !lab[c + N]) { lab[c + N] = 1; st.push(c + N); }
+      }
+      if (!edge && size > N * N * 0.006) holes++;
+    }
+    return holes;
+  }
+  /* 선 토막(이미 글자 방향 좌표) → 펜 r 로 칠한 GG×GG 격자 + 구멍 수 */
+  function rasterStrokes(segs, b, r) {
+    var S = 4, N = GG * S, w = (b.x1 - b.x0) || 1e-6, h = (b.y1 - b.y0) || 1e-6, fine = new Uint8Array(N * N), out = new Float32Array(GG * GG), r2 = r * r;
+    for (var j = 0; j < N; j++) {
+      var py = b.y0 + (j + 0.5) / N * h;
+      for (var i = 0; i < N; i++) {
+        var px = b.x0 + (i + 0.5) / N * w;
+        for (var k = 0; k < segs.length; k++) {
+          var s = segs[k], dx = s[2] - s[0], dy = s[3] - s[1], L2 = dx * dx + dy * dy, t = L2 ? Math.max(0, Math.min(1, ((px - s[0]) * dx + (py - s[1]) * dy) / L2)) : 0, ex = s[0] + t * dx - px, ey = s[1] + t * dy - py;
+          if (ex * ex + ey * ey <= r2) { fine[j * N + i] = 1; out[Math.floor(j / S) * GG + Math.floor(i / S)] += 1 / (S * S); break; }
+        }
+      }
+    }
+    return { g: out, holes: countHoles(fine, N) };
+  }
+  /* 선 글꼴 참조 글자(직접 그린 한 줄 선 글자 — ISO 3098 · CAD 기본 선 글꼴과 같은 꼴). 단위: 대문자 높이 10, 기준선 0, 위로 +.
+     「E:cx,cy,rx,ry」 = 타원 꺾은선. 같은 글자의 다른 꼴은 「글자#이름」 */
+  var STROKE_FONT = {
+    '0': ['E:3,5,3,5'], '1': [[[1.4, 8], [3, 10], [3, 0]]], '1#i': [[[3, 10], [3, 0]]],
+    '2': [[[0.3, 7.8], [1, 9.3], [2, 10], [4, 10], [5, 9.3], [5.7, 8], [5.7, 6.8], [5, 5.5], [0, 0], [6, 0]]],
+    '3': [[[0.5, 9], [1.5, 10], [4.5, 10], [5.5, 9], [5.5, 7], [4.5, 5.5], [2.5, 5.5]], [[4.5, 5.5], [5.8, 4], [5.8, 1.5], [4.5, 0], [1.5, 0], [0.3, 1]]],
+    '4': [[[4.5, 0], [4.5, 10], [0, 3], [6, 3]]],
+    '5': [[[5.5, 10], [0.8, 10], [0.4, 5.6], [1.5, 6.3], [3.5, 6.5], [5, 5.8], [5.9, 4.2], [5.9, 2], [5, 0.6], [3.5, 0], [1.5, 0], [0.3, 1]]],
+    '6': [[[5.2, 9], [4, 10], [2, 10], [0.7, 8.7], [0.1, 6], [0.1, 3], [0.8, 0.8], [2.2, 0], [4, 0], [5.4, 0.9], [6, 2.6], [5.4, 4.6], [4, 5.6], [2.2, 5.6], [0.8, 4.6], [0.1, 3]]],
+    '7': [[[0, 10], [6, 10], [2, 0]]],
+    '8': ['E:3,7.5,2.5,2.5', 'E:3,2.5,3,2.5'],
+    '9': [[[0.8, 1], [2, 0], [4, 0], [5.3, 1.3], [5.9, 4], [5.9, 7], [5.2, 9.2], [3.8, 10], [2, 10], [0.6, 9.1], [0, 7.4], [0.6, 5.4], [2, 4.4], [3.8, 4.4], [5.2, 5.4], [5.9, 7]]],
+    'A': [[[0, 0], [3.2, 10], [6.4, 0]], [[1.2, 3.5], [5.2, 3.5]]],
+    'B': [[[0, 0], [0, 10], [4, 10], [5.2, 9.3], [5.6, 8], [5.2, 6.4], [4, 5.5], [0, 5.5]], [[4, 5.5], [5.5, 4.7], [6, 3], [5.5, 1], [4.2, 0], [0, 0]]],
+    'C': [[[6, 8.3], [5, 9.6], [3.5, 10], [2, 9.6], [0.8, 8.5], [0.1, 6.5], [0.1, 3.5], [0.8, 1.5], [2, 0.4], [3.5, 0], [5, 0.4], [6, 1.7]]],
+    'D': [[[0, 0], [0, 10], [3, 10], [4.8, 9.2], [5.8, 7.5], [6.1, 5], [5.8, 2.5], [4.8, 0.8], [3, 0], [0, 0]]],
+    'E': [[[6, 10], [0, 10], [0, 0], [6, 0]], [[0, 5.3], [4.5, 5.3]]],
+    'F': [[[6, 10], [0, 10], [0, 0]], [[0, 5.3], [4.5, 5.3]]],
+    'G': [[[6, 8.3], [5, 9.6], [3.5, 10], [2, 9.6], [0.8, 8.5], [0.1, 6.5], [0.1, 3.5], [0.8, 1.5], [2, 0.4], [3.5, 0], [5, 0.4], [6, 1.7], [6, 4.5], [3.5, 4.5]]],
+    'H': [[[0, 0], [0, 10]], [[6, 0], [6, 10]], [[0, 5.3], [6, 5.3]]],
+    'J': [[[4.5, 10], [4.5, 2.5], [3.8, 0.6], [2.5, 0], [1, 0.5], [0.2, 2]]],
+    'K': [[[0, 0], [0, 10]], [[6, 10], [0, 3.5]], [[2, 5.6], [6.2, 0]]],
+    'L': [[[0, 10], [0, 0], [5.5, 0]]],
+    'M': [[[0, 0], [0, 10], [3.5, 0], [7, 10], [7, 0]]], 'M#v': [[[0, 0], [0, 10], [3.5, 4], [7, 10], [7, 0]]],
+    'N': [[[0, 0], [0, 10], [6, 0], [6, 10]]],
+    'O': ['E:3.3,5,3.3,5'], 'O#shx': [[[1.6, 0], [5, 0], [6.6, 1.8], [6.6, 8.2], [5, 10], [1.6, 10], [0, 8.2], [0, 1.8], [1.6, 0]]], '0#shx': [[[1.4, 0], [4.6, 0], [6, 1.6], [6, 8.4], [4.6, 10], [1.4, 10], [0, 8.4], [0, 1.6], [1.4, 0]]],
+    'P': [[[0, 0], [0, 10], [4.2, 10], [5.5, 9.2], [6, 7.6], [5.5, 6], [4.2, 5.2], [0, 5.2]]],
+    'R': [[[0, 0], [0, 10], [4.2, 10], [5.5, 9.2], [6, 7.6], [5.5, 6], [4.2, 5.2], [0, 5.2]], [[3.5, 5.2], [6, 0]]],
+    'S': [[[5.6, 8.7], [4.6, 9.7], [3, 10], [1.4, 9.7], [0.4, 8.6], [0.4, 7.2], [1.2, 6.1], [4.8, 4.4], [5.8, 3.2], [5.8, 1.5], [4.7, 0.3], [3, 0], [1.2, 0.3], [0.1, 1.4]]],
+    'T': [[[0, 10], [6.4, 10]], [[3.2, 10], [3.2, 0]]],
+    'U': [[[0, 10], [0, 3], [0.6, 1], [1.8, 0.1], [3, 0], [4.2, 0.1], [5.4, 1], [6, 3], [6, 10]]],
+    'V': [[[0, 10], [3.2, 0], [6.4, 10]]],
+    'W': [[[0, 10], [2, 0], [4.2, 10], [6.4, 0], [8.4, 10]]],
+    'X': [[[0, 10], [6, 0]], [[0, 0], [6, 10]]],
+    'Y': [[[0, 10], [3.2, 5], [6.4, 10]], [[3.2, 5], [3.2, 0]]],
+    'Z': [[[0, 10], [6, 10], [0, 0], [6, 0]]],
+    'a': [[[0.6, 6.2], [1.8, 7], [3.5, 7], [4.7, 6.3], [5, 5], [5, 0]], [[5, 3.8], [1.8, 3.6], [0.4, 2.6], [0.2, 1.3], [1, 0.2], [2.4, 0], [3.8, 0.3], [5, 1.5]]],
+    'x': [[[0, 7], [5, 0]], [[0, 0], [5, 7]]],
+    'z': [[[0, 7], [5, 7], [0, 0], [5, 0]]],
+    '+': [[[0, 4.5], [6, 4.5]], [[3, 1.5], [3, 7.5]]],
+    '±': [[[0, 6], [6, 6]], [[3, 3], [3, 9]], [[0, 0.5], [6, 0.5]]],
+    '(': [[[3, 11], [1.5, 9], [0.6, 6.5], [0.4, 4], [0.6, 1.5], [1.5, -1], [3, -3]]],
+    ')': [[[0, 11], [1.5, 9], [2.4, 6.5], [2.6, 4], [2.4, 1.5], [1.5, -1], [0, -3]]],
+    '/': [[[0, -1], [5, 11]]],
+    'Ø': ['E:3.5,5,3.3,5', [[0, -0.5], [7, 10.5]]], 'Ø#f': ['E:3.5,5,3.5,3.4', [[2.5, -0.5], [4.5, 10.5]]]
+  };
+  var STROKE_T = null;
+  function strokeTemplates() {
+    if (STROKE_T) return STROKE_T;
+    STROKE_T = [];
+    Object.keys(STROKE_FONT).forEach(function (key) {
+      var segs = [];
+      STROKE_FONT[key].forEach(function (pl) {
+        if (typeof pl === 'string') { var e = pl.slice(2).split(',').map(Number), prev = null; for (var k = 0; k <= 36; k++) { var t = k / 36 * 2 * Math.PI, p = [e[0] + e[2] * Math.cos(t), -(e[1] + e[3] * Math.sin(t))]; if (prev) segs.push([prev[0], prev[1], p[0], p[1]]); prev = p; } return; }
+        for (var i = 1; i < pl.length; i++) segs.push([pl[i - 1][0], -pl[i - 1][1], pl[i][0], -pl[i][1]]);
+      });
+      var pts = []; segs.forEach(function (s) { pts.push([s[0], s[1]], [s[2], s[3]]); });
+      var b0 = boxOfPts(pts), r = 0.65, bb = pad(b0, r), ras = rasterStrokes(segs, bb, r);
+      STROKE_T.push({ ch: key.replace(/#.+$/, ''), g: ras.g, holes: ras.holes, ar: (bb.x1 - bb.x0) / (bb.y1 - bb.y0), h: (b0.y1 - b0.y0) / 10, vtop: b0.y0 / 10, vbot: b0.y1 / 10 });
+    });
+    return STROKE_T;
+  }
+  /* 선 글자 하나(cl.segs, 화면 좌표)를 방향 a 로 읽기 → { ch, s, ub } */
+  function readStrokeGlyph(cl, a, cap, T, allow) {
+    var segs = cl.segs.map(function (s) { var p = local(s[0], s[1], a), q = local(s[2], s[3], a); return [p[0], p[1], q[0], q[1]]; });
+    var pts = []; segs.forEach(function (s) { pts.push([s[0], s[1]], [s[2], s[3]]); });
+    var r = 0.065 * cap, b0 = boxOfPts(pts), bb = pad(b0, r), w = bb.x1 - bb.x0, h = bb.y1 - bb.y0;
+    var ras = rasterStrokes(segs, bb, r), x = { gr: ras.g, ar: w / Math.max(h, 1e-3), g: { holes: ras.holes } };
+    var best = null;
+    (T || strokeTemplates()).forEach(function (t) {
+      if (allow && !allow.test(t.ch)) return;
+      var sc = shapeScore(x, t) + 0.5 * Math.abs((b0.y1 - b0.y0) / cap - t.h);
+      if (!best || sc < best.s) best = { ch: t.ch, s: sc };
+    });
+    return { ch: best ? best.ch : '?', s: best ? best.s : 9, ub: { u0: bb.x0, u1: bb.x1, v0: bb.y0, v1: bb.y1 }, h: h, w: w };
+  }
+  /* 곧은 선 하나로 된 글자(1 · I · / · -)인가 — 모든 토막이 한 방향 */
+  function isLineGlyph(c) {
+    var a0 = null;
+    return c.segs.every(function (s) { var L = dist(s[0], s[1], s[2], s[3]); if (L < 0.3) return true; var a = Math.atan2(s[3] - s[1], s[2] - s[0]); if (a0 == null) { a0 = a; return true; } return Math.abs(Math.sin(a - a0)) < 0.08; });
+  }
+  function readStrokeText(paints, items, cap, page) {
+    var T = strokeTemplates();
+    if (!T.length || !cap) return { items: items || [], added: 0, attached: 0 };
+    var subs = [];
+    (paints || []).forEach(function (pt) {
+      if (pt.kind === 'f') return;
+      pt.subs.forEach(function (sp) {
+        if (sp.rect || !sp.pts.length) return;
+        var b = boxOfPts(sp.pts), m = Math.max(b.x1 - b.x0, b.y1 - b.y0);
+        if (m > 1.5 * cap) return;
+        subs.push({ b: b, segs: subSegs(sp), pid: sp.pid });
+      });
+    });
+    if (!subs.length) return { items: items || [], added: 0, attached: 0 };
+    // 겹치는(0.05×대문자 높이 안) 토막끼리 한 글자로
+    var par = subs.map(function (_, i) { return i; });
+    function find(i) { while (par[i] !== i) { par[i] = par[par[i]]; i = par[i]; } return i; }
+    var near = gridIndex(subs, function (s) { return s.b; }, Math.max(4, 2 * cap)), e = 0.05 * cap;
+    subs.forEach(function (s, i) { s.i = i; });
+    subs.forEach(function (s, i) { near(s.b.x0 - e, s.b.y0 - e, s.b.x1 + e, s.b.y1 + e).forEach(function (o) { if (o.i !== i && boxOverlap(pad(s.b, e), o.b)) par[find(o.i)] = find(i); }); });
+    var cmap = {};
+    subs.forEach(function (s, i) { var r = find(i); (cmap[r] = cmap[r] || { segs: [], b: null }); cmap[r].segs = cmap[r].segs.concat(s.segs); cmap[r].b = union(cmap[r].b, s.b); });
+    var cls = Object.keys(cmap).map(function (k) { return cmap[k]; }).filter(function (c) { var m = Math.max(c.b.x1 - c.b.x0, c.b.y1 - c.b.y0); return m >= 0.35 * cap && m <= 1.5 * cap && c.segs.length <= 80; });
+    var textBoxes = gridIndex(items || [], function (it) { return it.box; }, 40);
+    // 글자 층 글자 자리(글 방향으로 돌린 상자 안에 가운데가 든 것)는 빼기 — 비스듬한 글의 바깥 상자는 옆 글자까지 덮음
+    cls = cls.filter(function (c) {
+      var cc = center(c.b);
+      return !textBoxes(cc[0] - 1, cc[1] - 1, cc[0] + 1, cc[1] + 1).some(function (it) { var q = local(it.x, it.y, it.a), p = local(cc[0], cc[1], it.a); return p[0] > q[0] && p[0] < q[0] + it.w && p[1] > q[1] - 0.8 * it.h && p[1] < q[1] + 0.2 * it.h; });
+    });
+    cls.forEach(function (c, i) { c.i = i; });
+    var nearC = gridIndex(cls, function (c) { return c.b; }, 40), attached = 0, used = {};
+    var LETTER = /^[A-Z0-9Øx±+\-]$/;
+    // ④ 글자 층 글 앞 · 뒤 한 글자
+    (items || []).forEach(function (it) {
+      if (it.src === 'symbol' || !/\d/.test(it.str)) return;
+      var ic = 0.72 * it.h, q = local(it.x, it.y, it.a), u0 = q[0], u1 = q[0] + it.w, v = q[1];
+      nearC(it.box.x0 - 1.2 * ic, it.box.y0 - 1.2 * ic, it.box.x1 + 1.2 * ic, it.box.y1 + 1.2 * ic).forEach(function (c) {
+        var ci = c.i; if (used[ci]) return;
+        var corners = []; c.segs.forEach(function (sg) { corners.push(local(sg[0], sg[1], it.a), local(sg[2], sg[3], it.a)); }); // 실제 선 끝점(비스듬한 글은 바깥 상자 모서리가 글자 밖)
+        var cu0 = Math.min.apply(null, corners.map(function (p) { return p[0]; })), cu1 = Math.max.apply(null, corners.map(function (p) { return p[0]; }));
+        var cv0 = Math.min.apply(null, corners.map(function (p) { return p[1]; })), cv1 = Math.max.apply(null, corners.map(function (p) { return p[1]; }));
+        if (Math.abs(cv1 - v) > 0.3 * ic || cv1 - cv0 < 0.6 * ic || cv1 - cv0 > 1.35 * ic) return;
+        var before = cu1 <= u0 + 0.15 * ic && u0 - cu1 < 0.9 * ic, after = cu0 >= u1 - 0.15 * ic && cu0 - u1 < 0.6 * ic;
+        if (!before && !after) return;
+        if (!before || isLineGlyph(c)) return; // 앞에 붙는 글자만(M · R · Ø …). 곧은 선 하나(1 · / · -)는 치수선 · 보조선일 수 있어 붙이지 않음
+        var rd = readStrokeGlyph(c, it.a, ic, T, LETTER);
+        if (rd.s > 0.25 || !/^[A-HJ-Z]$|^Ø$/.test(rd.ch)) return;
+        used[ci] = 1; attached++;
+        if (before) { var np = fromLocal(cu0, v, it.a); it.w += u0 - cu0; it.x = np[0]; it.y = np[1]; it.str = rd.ch + it.str; }
+        else { it.w = cu1 - u0; it.str = it.str + rd.ch; }
+        it.box = itemBox(it.x, it.y, it.w, it.h, it.a); it.stroke = true;
+      });
+    });
+    // ⑤ 선 글자만으로 된 줄(같은 크기 · 같은 기준선 · 좁은 틈)
+    var added = [], free = cls.map(function (c, i) { return i; }).filter(function (i) { return !used[i]; });
+    [0, -Math.PI / 2, Math.PI / 2].forEach(function (a) {
+      var G = free.filter(function (i) { return !used[i]; }).map(function (i) {
+        var c = cls[i], cs = []; c.segs.forEach(function (sg) { cs.push(local(sg[0], sg[1], a), local(sg[2], sg[3], a)); });
+        return { i: i, u0: Math.min.apply(null, cs.map(function (p) { return p[0]; })), u1: Math.max.apply(null, cs.map(function (p) { return p[0]; })), v0: Math.min.apply(null, cs.map(function (p) { return p[1]; })), v1: Math.max.apply(null, cs.map(function (p) { return p[1]; })) };
+      }).filter(function (g) { var hh = g.v1 - g.v0; return hh >= 0.55 * cap && hh <= 1.4 * cap; }).sort(function (p, q) { return p.u0 - q.u0; });
+      var lines = [];
+      G.forEach(function (g) {
+        // 같은 줄: 기준선이 같고(소문자 a · x 는 키가 작아 높이 차이는 큰 쪽의 35% 까지) 틈이 좁음
+        var L = lines.filter(function (l) { var last = l.m[l.m.length - 1], hl = last.v1 - last.v0, hg = g.v1 - g.v0, hh = Math.max(hl, hg); return Math.abs(last.v1 - g.v1) < 0.2 * hh && Math.abs(hg - hl) < 0.35 * hh && g.u0 - last.u1 > -0.1 * hh && g.u0 - last.u1 < 0.75 * hh; })[0];
+        if (L) L.m.push(g); else lines.push({ m: [g] });
+      });
+      lines.forEach(function (l) {
+        if (l.m.length < 2) return;
+        var hh = Math.max.apply(null, l.m.map(function (g) { return g.v1 - g.v0; }));
+        var rd = l.m.map(function (g) { return readStrokeGlyph(cls[g.i], a, hh, T, /^[A-Za-z0-9.,+\-±()°Øx\/]$/); });
+        var mean = rd.reduce(function (s, x) { return s + x.s; }, 0) / rd.length;
+        var straight = l.m.filter(function (g) { return isLineGlyph(cls[g.i]); }).length;
+        if (mean > 0.22 || rd.some(function (x, k) { return x.s > (isLineGlyph(cls[l.m[k].i]) ? 0.3 : 0.24); }) || l.m.length - straight < 2 || straight > l.m.length / 2) return;
+        // 앞뒤가 글자면 1 → I · 0 → O, 앞뒤가 숫자면 O → 0 · I → 1 (윤곽선 읽기와 같은 바로잡기)
+        rd.forEach(function (x, k) {
+          var a0 = rd[k - 1], b0 = rd[k + 1], isL = function (y) { return y && /[A-Za-z]/.test(y.ch); }, dig = function (y) { return y && /[0-9]/.test(y.ch); };
+          if ((isL(a0) || isL(b0)) && !dig(a0) && !dig(b0)) { if (x.ch === '1') x.ch = 'I'; else if (x.ch === '0') x.ch = 'O'; }
+          if ((dig(a0) || dig(b0)) && !isL(a0) && !isL(b0)) { if (x.ch === 'O') x.ch = '0'; else if (x.ch === 'I') x.ch = '1'; }
+        });
+        var s0 = '';
+        rd.forEach(function (x, k) { if (k && l.m[k].u0 - l.m[k - 1].u1 > 0.55 * hh) s0 += ' '; s0 += x.ch; });
+        // 그럴듯한 글만: 치수 · 용접 · 공차 형식이거나, 모음이 든 3글자 이상 낱말(빗금 「XXX」 · 평행선 「11」 같은 되풀이는 아님)
+        var plain = s0.replace(/\s+/g, '');
+        if (/^(.)\1*$/.test(plain)) return;
+        if (!classifyToken(s0).cat && !(/[AEIOUaeiou]/.test(plain) && plain.replace(/[^A-Za-z]/g, '').length >= 3)) return;
+        l.m.forEach(function (g) { used[g.i] = 1; });
+        var u0 = l.m[0].u0, u1 = l.m[l.m.length - 1].u1, v1 = Math.max.apply(null, l.m.map(function (g) { return g.v1; })), p = fromLocal(u0, v1, a), H = hh / 0.72;
+        added.push({ id: 'k' + page + '_' + added.length, page: page, str: s0, x: p[0], y: p[1], w: u1 - u0, h: H, a: a, box: itemBox(p[0], p[1], u1 - u0, H, a), src: 'stroke', score: round(mean, 3) });
+      });
+    });
+    return { items: (items || []).concat(added), added: added.length, attached: attached };
+  }
+
   /* ── 4-2. 선으로 그린 기호(Ø · 기하공차 기호) ────────────────
      윤곽선 PDF 에서 지름 기호 Ø 는 「작은 원 + 가운데를 지나는 비스듬한 선」, 기하공차 틀의 기호는 선 몇 개로 그어져 있어 글자로 읽히지 않습니다.
      원 · 짧은 선의 배치로 Ø ◎ ⌖ ⊥ ∥ ▱ 를 알아보고, Ø 는 바로 오른쪽 글자 앞에 붙이고, 기하공차 기호는 틀 칸 안에 있을 때만 글자 조각으로 더합니다. */
+  /* 한 줄로 이어진 점(가운데 점이 직선 위)은 빼서 긴 선 하나로 — 선 글꼴은 「⊥」 의 가로 · 세로를 두 토막으로 긋기도 함(3차) */
+  function straighten(q, closed) {
+    if (q.length < 3) return q;
+    var o = [q[0]];
+    for (var i = 1; i < q.length - 1; i++) {
+      var A = o[o.length - 1], B = q[i], C = q[i + 1], ab = dist(A[0], A[1], B[0], B[1]), bc = dist(B[0], B[1], C[0], C[1]);
+      var cr = Math.abs((B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0])) / Math.max(1e-6, ab + bc);
+      var dot = (B[0] - A[0]) * (C[0] - B[0]) + (B[1] - A[1]) * (C[1] - B[1]);
+      if (cr < 0.04 * (ab + bc) && dot > 0) continue;
+      o.push(B);
+    }
+    o.push(q[q.length - 1]);
+    return o;
+  }
   function strokeShapes(paints) {
     var circles = [], lines = [], polys4 = [], rings = [];
     (paints || []).forEach(function (pt) {
       if (pt.kind === 'f') return;
       pt.subs.forEach(function (sp) {
         var p = sp.pts, n = p.length;
-        if (sp.curves >= 2 && n >= 10) {
+        // 원: 곡선(베지어) 또는 점이 많은 닫힌 꺾은선(한 줄 선 글꼴의 Ø · ◎ 는 꺾은선 원 — 3차)
+        if ((sp.curves >= 2 && n >= 10) || (!sp.curves && n >= 16 && dist(p[0][0], p[0][1], p[n - 1][0], p[n - 1][1]) < 0.15 * Math.max(boxOfPts(p).x1 - boxOfPts(p).x0, 0.1))) {
           var bb = boxOfPts(p), cx = (bb.x0 + bb.x1) / 2, cy = (bb.y0 + bb.y1) / 2, w = bb.x1 - bb.x0, h = bb.y1 - bb.y0, r = (w + h) / 4; // 점이 고르지 않아 평균 대신 상자 가운데
           var sd = Math.sqrt(p.reduce(function (a, q) { var d = dist(q[0], q[1], cx, cy) - r; return a + d * d; }, 0) / n);
           if (r >= 0.8 && r <= 10 && w / h > 0.85 && w / h < 1.18 && sd / r < 0.08 && (sp.closed || dist(p[0][0], p[0][1], p[n - 1][0], p[n - 1][1]) < 0.3 * r)) circles.push({ cx: cx, cy: cy, r: r, pid: sp.pid });
           return;
         }
         if (sp.curves) return;
-        var q = dedupePts(p);
+        var q = straighten(dedupePts(p), sp.closed);
         if (q.length >= 6 && dist(p[0][0], p[0][1], p[n - 1][0], p[n - 1][1]) < 0.3) { var rb = boxOfPts(q); if (rb.x1 - rb.x0 < 4 && rb.y1 - rb.y0 < 4 && rb.x1 - rb.x0 > 0.6) rings.push({ cx: (rb.x0 + rb.x1) / 2, cy: (rb.y0 + rb.y1) / 2, r: (rb.x1 - rb.x0 + rb.y1 - rb.y0) / 4 }); }
         var closedP = sp.closed || (p.length > 4 && dist(p[0][0], p[0][1], p[n - 1][0], p[n - 1][1]) < 0.3);
         if (q.length === 4 && closedP) polys4.push({ pts: q, pid: sp.pid, b: boxOfPts(q) });
@@ -609,9 +885,11 @@
   }
   function segBox(s) { return { x0: Math.min(s.x1, s.x2), y0: Math.min(s.y1, s.y2), x1: Math.max(s.x1, s.x2), y1: Math.max(s.y1, s.y2) }; }
   /* (cx,cy) 를 둘러싼 틀 칸: 왼쪽 · 오른쪽 세로선과 위 · 아래 가로선 */
-  function cellAround(cx, cy, near, maxd) {
+  function cellAround(cx, cy, near, maxd, skip, minLen) {
     var L = null, R = null, U = null, D = null;
     near(cx - maxd, cy - maxd, cx + maxd, cy + maxd).forEach(function (s) {
+      if (minLen && dist(s.x1, s.y1, s.x2, s.y2) < minLen) return; // 꺾은선 원(Ø)의 짧은 토막은 칸 테두리가 아님
+      if (skip && inBox(skip, s.x1, s.y1) && inBox(skip, s.x2, s.y2)) return; // 기호 자신의 선(▱ 의 가로변 등)은 칸 테두리가 아님
       var vert = Math.abs(s.x1 - s.x2) < 0.3, hor = Math.abs(s.y1 - s.y2) < 0.3;
       if (vert && Math.min(s.y1, s.y2) <= cy && Math.max(s.y1, s.y2) >= cy) { var dx = s.x1 - cx; if (dx < 0 && -dx < maxd && (L == null || dx > L)) L = dx; if (dx > 0 && dx < maxd && (R == null || dx < R)) R = dx; }
       if (hor && Math.min(s.x1, s.x2) <= cx && Math.max(s.x1, s.x2) >= cx) { var dy = s.y1 - cy; if (dy < 0 && -dy < maxd && (U == null || dy > U)) U = dy; if (dy > 0 && dy < maxd && (D == null || dy < D)) D = dy; }
@@ -638,7 +916,9 @@
       else if (through.length === 1 && axisDeg(through[0].ang) > 40) kind = 'Ø';
       if (!kind) return;
       circUsed[c.i] = 1; inner.forEach(function (o) { circUsed[o.i] = 1; }); through.forEach(function (l) { lineUsed[l.i] = 1; });
-      out.push({ kind: kind, cx: c.cx, cy: c.cy, r: c.r, box: { x0: c.cx - c.r, y0: c.cy - c.r * 1.3, x1: c.cx + c.r, y1: c.cy + c.r * 1.3 } });
+      var sb = { x0: c.cx - c.r, y0: c.cy - c.r * 1.3, x1: c.cx + c.r, y1: c.cy + c.r * 1.3 };
+      if (kind === '⌖') hv.forEach(function (l) { sb = union(sb, segBox(l)); }); // 십자선이 원 밖으로 나온 만큼(틀 칸 테두리로 잘못 보지 않게)
+      out.push({ kind: kind, cx: c.cx, cy: c.cy, r: c.r, box: sb });
     });
     // × : 같은 상자를 대각선으로 지나는 짧은 선 둘 · ° : 아주 작은 고리(원 또는 닫힌 꺾은선)
     sh.lines.forEach(function (l) {
@@ -662,6 +942,19 @@
         var base = nb.filter(function (o) { return o !== l && !lineUsed[o.i] && axisDeg(o.ang) < 5 && Math.abs(o.my - bot) < 0.4 && Math.abs(o.mx - x) < 0.15 * o.L && o.L > 0.6 * l.L && o.L < 1.6 * l.L; })[0];
         if (base) { lineUsed[l.i] = lineUsed[base.i] = 1; out.push({ kind: '⊥', cx: x, cy: bot - l.L / 2, r: l.L / 2, box: { x0: base.mx - base.L / 2, y0: bot - l.L, x1: base.mx + base.L / 2, y1: bot } }); }
       }
+    });
+    var nearSeg = gridIndex(segs || [], segBox, 40);
+    // ⏤ 진직도: 틀 칸 한가운데 홀로 있는 짧은 가로선(칸 테두리에 닿지 않음)
+    sh.lines.forEach(function (l) {
+      // 칸 크기는 선 길이에 견줌(쪽 글자 크기 잣대는 표제란 작은 글에 끌려 작아질 수 있음)
+      if (lineUsed[l.i] || axisDeg(l.ang) > 3 || l.L < 0.6 * cap || l.L > 2.6 * cap) return;
+      var cl = cellAround(l.mx, l.my, nearSeg, 2.4 * l.L);
+      if (!cl || cl.x1 - cl.x0 > 3.2 * l.L || cl.y1 - cl.y0 > 3 * l.L || cl.x1 - cl.x0 < 1.15 * l.L) return;
+      var gx = Math.min(Math.min(l.x1, l.x2) - cl.x0, cl.x1 - Math.max(l.x1, l.x2)), gy = Math.min(l.my - cl.y0, cl.y1 - l.my);
+      if (gx < 0.08 * l.L || gy < 0.25 * l.L || Math.abs((cl.y0 + cl.y1) / 2 - l.my) > 0.2 * (cl.y1 - cl.y0)) return;
+      var others = nearL(cl.x0 + 0.1, cl.y0 + 0.1, cl.x1 - 0.1, cl.y1 - 0.1).filter(function (o) { return o !== l && o.mx > cl.x0 + 0.2 && o.mx < cl.x1 - 0.2 && o.my > cl.y0 + 0.2 && o.my < cl.y1 - 0.2; });
+      if (others.length) return;
+      lineUsed[l.i] = 1; out.push({ kind: '⏤', cx: l.mx, cy: l.my, r: l.L / 2, box: pad(segBox(l), 0.3) });
     });
     sh.polys4.forEach(function (p) {
       var e = [0, 1, 2, 3].map(function (k) { var A = p.pts[k], B = p.pts[(k + 1) % 4]; return axisDeg(Math.atan2(B[1] - A[1], B[0] - A[0])); });
@@ -702,8 +995,16 @@
         it.w += q0[0] - nu; it.x = np[0]; it.y = np[1]; it.str = 'Ø' + it.str; it.box = itemBox(it.x, it.y, it.w, it.h, it.a);
         return;
       }
-      var cell = cellAround(sym.cx, sym.cy, nearS, 2.2 * cap);
-      if (!cell || !best || (cell.x1 - cell.x0) > 4 * cap || (cell.y1 - cell.y0) > 3 * cap) return;
+      if (!best) return;
+      var cap2 = Math.max(cap, 0.72 * best.it.h); // 칸 크기 잣대: 쪽 글자 크기와 그 칸 글자 크기 중 큰 것
+      var cell = cellAround(sym.cx, sym.cy, nearS, 2.2 * cap2, pad(sym.box, 0.3), 0.5 * cap2);
+      if (!cell || Math.max(cell.x1 - cell.x0, cell.y1 - cell.y0) > 4 * cap2 || Math.min(cell.x1 - cell.x0, cell.y1 - cell.y0) > 3 * cap2) return;
+      // 칸 글자도 틀 칸 안에 있고, 두 칸이 한 변을 함께 써야 기하공차 틀(3차 — 구멍 중심 표시 · 도면 선 옆 치수를 기호로 잡던 것)
+      var tb = best.it.box, tcell = cellAround((tb.x0 + tb.x1) / 2, (tb.y0 + tb.y1) / 2, nearS, 6 * cap2, null, 0.5 * cap2), eps = 0.25 * cap2;
+      if (!tcell) return;
+      var side = (Math.abs(cell.x1 - tcell.x0) < eps || Math.abs(cell.x0 - tcell.x1) < eps) && Math.abs(cell.y0 - tcell.y0) < eps && Math.abs(cell.y1 - tcell.y1) < eps;
+      var stackd = (Math.abs(cell.y1 - tcell.y0) < eps || Math.abs(cell.y0 - tcell.y1) < eps) && Math.abs(cell.x0 - tcell.x0) < eps && Math.abs(cell.x1 - tcell.x1) < eps;
+      if (!side && !stackd) return;
       var b0 = best.it, qb = local(b0.x, b0.y, b0.a), ps = fromLocal(local(sym.box.x0, sym.cy, b0.a)[0], qb[1], b0.a), ww = sym.box.x1 - sym.box.x0;
       add.push({ id: 'g' + (b0.page || 1) + '_' + si, page: b0.page || 1, str: sym.kind, x: ps[0], y: ps[1], w: ww, h: b0.h, a: b0.a, box: itemBox(ps[0], ps[1], ww, b0.h, b0.a), src: 'symbol' });
     });
@@ -785,6 +1086,7 @@
       r.note = '개수 ' + m[1] + ' · 길이 ' + m[2] + (m[3] ? ' · ' + m[3] + '°' : ''); return r;
     }
     if (/^C\.?\s?W\.?$/i.test(s) || /^(FULL\s*PEN|CJP|PJP)$/i.test(s)) { r.cat = '용접'; r.kind = '연속 용접'; r.unit = ''; return r; }
+    if (/^z\s?\d+(?:\.\d+)?(?:\s+z\s?\d+(?:\.\d+)?)+$/.test(s)) { r.cat = '용접'; r.kind = '각장'; r.spec = s.replace(/\s+/g, ' ').replace(/z\s/g, 'z'); r.nominal = parseFloat(s.replace(/^z\s?/, '')); r.note = '양쪽 각장'; return r; } // 「z6 z8」 = 양쪽 각장(3차)
     if ((m = new RegExp('^([az])\\s?' + NUM + '$').exec(s))) { r.cat = '용접'; r.kind = m[1] === 'a' ? '목두께' : '각장'; r.nominal = +m[2]; return r; }
     if ((m = /^(\d+)\s*-\s*(\d+)\s*\(\s*(\d+)\s*\)$/.exec(s))) { r.cat = '용접'; r.kind = '단속 용접'; r.note = '개수 ' + m[1] + ' · 길이 ' + m[2] + ' · 피치 ' + m[3]; r.unit = ''; return r; }
     if (/^[▽△◺⊿▷◁▼▲◸◹◿]+$/.test(s)) { r.cat = '용접'; r.kind = '용접 기호 글자'; r.unit = ''; r.check = true; r.note = '표면 기호일 수도 있음'; return r; }
@@ -799,7 +1101,7 @@
     r.count = m[1] ? +m[1] : null;
     r.kind = KIND_BY_PREFIX[prefix] || (m[5] ? '각도' : '길이');
     r.unit = m[5] ? '°' : 'mm';
-    if (prefix === 'M' && m[4]) r.note = '피치 ' + m[4];
+    if (prefix === 'M' && m[4]) { if (+m[4] <= Math.min(6, +m[3] / 2)) { r.note = '피치 ' + m[4]; r.pitch = +m[4]; } else r.note = '깊이 ' + m[4]; } // 「M20 x28」 의 28 은 피치가 아니라 나사 깊이
     if (/x\s*45\s*°/i.test(s)) { r.kind = '모따기'; }
     r.upper = tail.upper; r.lower = tail.lower; r.cls = tail.cls; r.check = tail.check;
     if (tail.note) r.note = (r.note ? r.note + ' · ' : '') + tail.note;
@@ -890,8 +1192,8 @@
   var CATS = ['치수', '공차', '기하공차', '용접', '주기', '기타'];
   function candId(page, b) { return 'c' + page + '_' + Math.round((b.x0 + b.x1) / 2) + '_' + Math.round((b.y0 + b.y1) / 2); }
   function makeCand(page, t, c, extra) {
-    var o = { id: candId(page, t.box), page: page, raw: t.str, box: t.box, cx: (t.box.x0 + t.box.x1) / 2, cy: (t.box.y0 + t.box.y1) / 2, h: t.h || 10,
-      cat: c.cat, kind: c.kind, nominal: c.nominal, upper: c.upper, lower: c.lower, unit: c.unit, count: c.count, cls: c.cls, datum: c.datum, spec: c.spec || '',
+    var o = { id: candId(page, t.box), page: page, raw: t.str, box: t.box, cx: (t.box.x0 + t.box.x1) / 2, cy: (t.box.y0 + t.box.y1) / 2, h: t.h || 10, a: t.a,
+      cat: c.cat, kind: c.kind, nominal: c.nominal, upper: c.upper, lower: c.lower, unit: c.unit, count: c.count, cls: c.cls, datum: c.datum, spec: c.spec || '', pitch: c.pitch,
       check: !!c.check, note: c.note || '', src: 'auto', tokens: t.id ? [t.id] : [] };
     return Object.assign(o, extra || {});
   }
@@ -906,6 +1208,7 @@
       var c = classifyToken(t.str);
       if (!c.cat) return;
       if (c.cat === '기타' && s.includeEtc === false) return;
+      if (t.circled) { excluded.push({ token: t, raw: t.str, box: t.box, reason: '원 안 번호(품번 · 풍선)' }); return; } // 3차: 품번 풍선 번호가 치수 · 용접 크기로 잡히던 것
       var zb = insideAny(t, boxes);
       if (zb) { excluded.push({ token: t, raw: t.str, box: t.box, reason: zb.reason }); return; }
       if (s.autoNotes !== false && c.cat !== '기하공차' && isNoteLine(t, pg.tokens)) { excluded.push({ token: t, raw: t.str, box: t.box, reason: '주기 문장' }); return; }
@@ -936,6 +1239,14 @@
     });
     cands = cands.filter(function (c) { return !c.used; });
     weldCallouts(pg, cands, boxes);
+    // 「2x」 · 「3x」 처럼 개수만 있는 글 → 가장 가까운(글자 높이 2.5배 안) 항목의 개수. 같은 Spec 을 그 수만큼 재야 함(3차 — 수강생 회신 ①)
+    (pg.tokens || []).forEach(function (t) {
+      var m = /^(\d+)\s*[xX×]$/.exec(normText(t.str));
+      if (!m || +m[1] < 2 || +m[1] > 99 || t.circled || insideAny(t, boxes)) return;
+      var best = null, hh = t.h || 10;
+      cands.forEach(function (c) { if (c.count) return; var d = boxDist(c.box, t.box); if (d < 2.5 * hh && (!best || d < best.d)) best = { c: c, d: d }; });
+      if (best) { best.c.count = +m[1]; best.c.note = (best.c.note ? best.c.note + ' · ' : '') + m[1] + '곳 — 「' + t.str + '」'; best.c.countTok = t.id; }
+    });
     cands.forEach(function (c) { c.std = stdOf(c); });
     return { cands: cands, excluded: excluded, boxes: boxes };
   }
@@ -948,9 +1259,10 @@
       if (insideAny({ cx: (r.x1 + r.x2) / 2, cy: (r.y1 + r.y2) / 2 }, boxes)) return;
       function rel(c) { var p = local(c.cx, c.cy, r.a); return { u: p[0], dv: p[1] - r.v }; }
       var hh = 12;
-      var near = cands.filter(function (c) { var q = rel(c); hh = c.h || hh; return q.u > r.u0 - 3 * c.h && q.u < r.u1 + 2 * c.h && Math.abs(q.dv) < 1.6 * c.h; });
+      // 기준선과 같은 방향으로 쓴 글만(세로 치수 글이 가로 기준선 옆에 있어도 용접 크기로 보지 않음 — 3차)
+      var near = cands.filter(function (c) { var q = rel(c); hh = c.h || hh; return (c.a == null || sameAngle(c.a, r.a) || sameAngle(c.a, r.a + Math.PI) || sameAngle(c.a, r.a - Math.PI)) && q.u > r.u0 - 3 * c.h && q.u < r.u1 + 2 * c.h && Math.abs(q.dv) < 1.6 * c.h; });
       near.forEach(function (c) {
-        if (c.cat === '치수' && c.kind === '길이' && c.upper == null && c.lower == null && !c.count) { c.cat = '용접'; c.kind = '용접 크기'; c.note = (c.note ? c.note + ' · ' : '') + '용접 기준선 위 숫자'; c.check = false; }
+        if (c.cat === '치수' && c.kind === '길이' && c.upper == null && c.lower == null && !c.count && rel(c).u > r.u0 - 0.5 * c.h && rel(c).dv * r.dash < 0) { c.cat = '용접'; c.kind = '용접 크기'; c.note = (c.note ? c.note + ' · ' : '') + '용접 기준선 위 숫자'; c.check = false; }
       });
       r.syms.forEach(function (sy) {
         var sized = near.some(function (c) { var q = rel(c); return c.cat === '용접' && q.dv * sy.side > 0 && q.u > r.u0 - 3 * c.h && q.u < sy.u1 + 1.5 * c.h; });
@@ -1085,7 +1397,9 @@
     segs.forEach(function (s, i) {
       [[s.x1, s.y1, s.x2, s.y2], [s.x2, s.y2, s.x1, s.y1]].forEach(function (e) {
         var dn = dist(e[0], e[1], b.cx, b.cy), df = dist(e[2], e[3], b.cx, b.cy);
-        if (Math.abs(dn - b.r) <= tolR && df > b.r + Math.max(2, 0.15 * b.r)) {
+        var colored = s.color && s.color !== '0,0,0';
+        // 색 있는 짧은 지시선(가운데서 나뉜 토막의 첫 토막)도 받도록 색 선은 1.2pt 만 벗어나면 됨(3차)
+        if (Math.abs(dn - b.r) <= tolR && df > b.r + (colored ? 1.2 : Math.max(2, 0.15 * b.r))) {
           // 지시선은 원 둘레에서 바깥으로 곧게(반지름 방향) 뻗음. 풍선 아래를 지나는 도면 선을 지시선으로 잡지 않게
           var L = dist(e[0], e[1], e[2], e[3]), rx = (e[0] - b.cx) / dn, ry = (e[1] - b.cy) / dn, cosr = ((e[2] - e[0]) * rx + (e[3] - e[1]) * ry) / (L || 1);
           if (cosr < 0.75) return;
@@ -1146,8 +1460,11 @@
       }
       return false;
     }
-    info.map(function (x, bi) { return bi; }).sort(function (a, b) { return (opts[a][0] ? opts[a][0].d : 1e9) - (opts[b][0] ? opts[b][0].d : 1e9); })
-      .forEach(function (bi) { tryAssign(bi, {}); });
+    // 먼저 전체 (풍선, 후보) 쌍을 거리 순으로 — 둘 다 비었으면 짝(가까운 짝이 먼 풍선에 밀려나 서로 바뀌던 것, 3차). 남은 풍선만 비켜 주기로
+    var all = [];
+    opts.forEach(function (list, bi) { list.forEach(function (o) { all.push({ bi: bi, o: o }); }); });
+    all.sort(function (p, q) { return p.o.d - q.o.d; }).forEach(function (e) { if (pick[e.bi] || owner[e.o.ci] != null) return; owner[e.o.ci] = e.bi; pick[e.bi] = e.o; });
+    info.map(function (x, bi) { return bi; }).filter(function (bi) { return !pick[bi]; }).forEach(function (bi) { tryAssign(bi, {}); });
     return info.map(function (x, bi) {
       var r = { no: x.b.no, page: x.b.page, balloon: x.b, leader: x.lead ? x.lead.path : null, target: null, candId: null, method: 'none', dist: null };
       var p = pick[bi];
@@ -1162,6 +1479,162 @@
     });
   }
 
+  /* ── 10-2. 검사 기준서 양식(수강생 기준서의 칸) ─────────────────
+     수강생이 쓰는 기준서(Standard Inspection Report)의 칸: No. · Inspection Item · Standard · Tolerance(MAX · MIN) · Inspection Equipment.
+     항목명은 영어 낱말(Dimension · Hole · Flatness … · Weld), 기준값은 도면 표기(용접 목두께는 「a4.6 (07x07)」 = a 와 그 각장, 단속은 「개수x길이」),
+     공차는 공칭에서 위 · 아래로 얼마(MAX · MIN). 공차를 적지 않은 치수는 도면 주기의 일반공차(ISO 13920 · ISO 2768)를 씁니다.
+     기하공차 · 표면 거칠기는 기준값 = 공차값, MAX 0 · MIN -공차값. 글자 없는 용접 기호는 항목명 Weld · 기준값 없음 · Visual, 부기는 항목명 = 문장. */
+  var ITEM_EN = { '길이': 'Dimension', '지름': 'Dimension', '구면 지름': 'Dimension', '반지름': 'Radius', '구면 반지름': 'Radius', '각도': 'Angle', '모따기': 'Chamfer', '나사': 'TAP', '표면 거칠기': 'Roughness',
+    '평면도': 'Flatness', '진직도': 'Straightness', '원통도': 'Cylindricity', '진원도': 'Roundness', '선의 윤곽도': 'Profile', '면의 윤곽도': 'Profile', '평행도': 'Parallelism', '직각도': 'Perpendicularity',
+    '경사도': 'Angularity', '위치도': 'Position', '동심도': 'Concentricity', '대칭도': 'Symmetry', '원주 흔들림': 'Runout', '온 흔들림': 'Total Runout' };
+  var ITEM_KR = {}; Object.keys(ITEM_EN).forEach(function (k) { if (!ITEM_KR[ITEM_EN[k].toUpperCase()]) ITEM_KR[ITEM_EN[k].toUpperCase()] = k; });
+  ITEM_KR.HOLE = '지름'; ITEM_KR.PCD = '지름'; ITEM_KR.DIMENSION = '길이'; ITEM_KR.STRAIGHTNESS = '진직도';
+  /* 일반공차 — ISO 13920(용접 구조물, 등급 A~D) · ISO 2768-1(기계 가공, f · m · c · v). 길이 구간 상한(mm)과 ± 값 */
+  var GEN_TOL = {
+    '13920': { lim: [30, 120, 400, 1000, 2000, 4000, 8000, 12000, 16000, 20000, Infinity],
+      A: [1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9], B: [1, 2, 2, 3, 4, 6, 8, 10, 12, 14, 16], C: [1, 3, 4, 6, 8, 11, 14, 18, 21, 24, 27], D: [1, 4, 7, 9, 12, 16, 21, 27, 32, 36, 40],
+      ang: { A: 20 / 60, B: 45 / 60, C: 1, D: 1.5 } }, // 각도: 짧은 변 400mm 이하 구간(변 길이를 모를 때)
+    '2768': { lim: [3, 6, 30, 120, 400, 1000, 2000, 4000],
+      F: [0.05, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, null], M: [0.1, 0.1, 0.2, 0.3, 0.5, 0.8, 1.2, 2], C: [0.2, 0.3, 0.5, 0.8, 1.2, 2, 3, 4], V: [null, 0.5, 1, 1.5, 2.5, 4, 6, 8], ang: {} }
+  };
+  /* 도면 글(주기 · 표제란)에서 일반공차 규격 찾기 → '13920-B' · '2768-m' · '' */
+  function detectGenTol(pages) {
+    var found = '';
+    (pages || []).some(function (pg) {
+      return (pg.items || []).some(function (it) {
+        var s = str(it.str).replace(/\s+/g, '').toUpperCase(), m;
+        if ((m = /13920-?([ABCD])/.exec(s))) { found = '13920-' + m[1]; return true; }
+        if ((m = /2768-?1?-?([FMCV])[HKL]?(?![A-Z])/.exec(s))) { found = '2768-' + m[1].toLowerCase(); return true; } // 「2768-mK」 의 K 는 기하공차 등급
+        return false;
+      });
+    });
+    return found;
+  }
+  /* 설정(auto · none · 규격) → 이 도면에 쓸 일반공차 */
+  function genTolFor(pages, s) { var g = (s && s.genTol) || 'auto'; return g === 'none' ? '' : g === 'auto' ? detectGenTol(pages) : g; }
+  function genTolOf(gen, nominal, angle) {
+    var m = /^(13920|2768)-([A-Za-z])$/.exec(str(gen)); if (!m || nominal == null) return null;
+    var T = GEN_TOL[m[1]], cls = m[2].toUpperCase();
+    if (angle) { var a = T.ang[cls]; return a == null ? null : round(a, 4); }
+    if (!T[cls] || Math.abs(nominal) < (m[1] === '13920' ? 2 : 0.5)) return null; // 표의 첫 구간(13920 은 2mm, 2768 은 0.5mm) 미만은 일반공차 없음
+    for (var i = 0; i < T.lim.length; i++) if (Math.abs(nominal) <= T.lim[i]) return T[cls][i];
+    return null;
+  }
+  /* ISO 미터 보통 나사 피치(ISO 261) — 도면에 「M20」 만 있으면 기준서에는 「M20x2.5」 처럼 피치를 붙여 씀 */
+  var COARSE_PITCH = { 1: 0.25, 1.2: 0.25, 1.6: 0.35, 2: 0.4, 2.5: 0.45, 3: 0.5, 4: 0.7, 5: 0.8, 6: 1, 8: 1.25, 10: 1.5, 12: 1.75, 14: 2, 16: 2, 18: 2.5, 20: 2.5, 22: 2.5, 24: 3, 27: 3, 30: 3.5, 33: 3.5, 36: 4, 39: 4, 42: 4.5, 45: 4.5, 48: 5, 52: 5, 56: 5.5, 60: 5.5, 64: 6 };
+  function fmtNum(n) { return n == null ? '' : String(round(n, 4)); }
+  /* 도구 결과(toPred 꼴) → 기준서 한 행 { item, std, max, min, eq, count } */
+  function sheetRow(p, gen) {
+    p = p || {};
+    var c = cmpCat(p), kind = str(p.kind), count = p.count > 1 ? p.count : null;
+    if (!p.cat) return { item: '', std: '', max: null, min: null, eq: '', count: null };
+    if (c === '용접 형상') return { item: 'Weld', std: '', max: null, min: null, eq: 'Visual', count: count };
+    if (c === '주기') return { item: str(p.raw).replace(/\s+/g, ' '), std: '', max: null, min: null, eq: 'Visual', count: count };
+    if (c === '용접') {
+      if (/목두께/.test(kind) && p.nominal != null) { var leg = Math.round(p.nominal * Math.SQRT2), l2 = (leg < 10 ? '0' : '') + leg; return { item: 'Weld', std: 'a' + fmtNum(p.nominal) + '\n(' + l2 + 'x' + l2 + ')', max: null, min: null, eq: 'Leg Length Gage', count: count }; }
+      if (/단속/.test(kind)) return { item: 'Weld', std: p.count != null && p.nominal != null ? p.count + 'x' + fmtNum(p.nominal) : str(p.spec), max: null, min: null, eq: 'Steel Ruler', count: null };
+      if (/각장/.test(kind)) return { item: 'Weld', std: p.spec || ('z' + fmtNum(p.nominal)), max: null, min: null, eq: 'Steel Ruler', count: count };
+      return { item: 'Weld', std: p.nominal != null ? fmtNum(p.nominal) : str(p.raw), max: null, min: null, eq: 'Steel Ruler', count: count };
+    }
+    if (c === '기하공차') return { item: ITEM_EN[kind] || kind, std: fmtNum(p.upper), max: 0, min: p.upper != null ? -p.upper : null, eq: 'CMM', count: count };
+    if (kind === '표면 거칠기') return { item: 'Roughness', std: fmtNum(p.nominal), max: 0, min: p.nominal != null ? -p.nominal : null, eq: 'Roughness\nMeasurement', count: count };
+    if (kind === '나사') { var pit = p.pitch || COARSE_PITCH[p.nominal]; return { item: 'TAP', std: str(p.spec) || ('M' + fmtNum(p.nominal) + (pit ? 'x' + fmtNum(pit) : '')), max: null, min: null, eq: 'Plug Gage', count: count }; }
+    if (kind === '모따기') return { item: 'Chamfer', std: fmtNum(p.nominal) + 'x45°', max: null, min: null, eq: 'CMM', count: count };
+    var item = ITEM_EN[kind] || 'Dimension';
+    if (/PCD/.test(str(p.note) + str(p.raw))) item = 'PCD';
+    else if (kind === '지름' || /^[A-Z]{1,2}\d/.test(str(p.cls))) item = 'Hole'; // 지름(Ø) · 구멍 끼워맞춤(대문자 H7 · F8 …)
+    var up = p.upper, lo = p.lower;
+    if (up == null && lo == null && p.nominal != null) { var g = genTolOf(gen || p.gen, p.nominal, kind === '각도'); if (g != null) { up = g; lo = -g; } }
+    return { item: item, std: fmtNum(p.nominal), max: up == null ? null : up, min: lo == null ? null : lo, eq: 'CMM', count: count };
+  }
+  /* 기준서 양식 엑셀(수강생 기준서와 같은 칸 · 순서): No. · Inspection Item · Standard · Tolerance MAX · MIN · Inspection Equipment,
+     그다음 개수(「2x」 = 같은 Spec 을 2곳 잼)와 측정값 칸. 개수가 n 이면 측정값 칸 n 개를 비워 두고, 그보다 뒤 칸은 「-」.
+     맨 뒤에 도구 메모(쪽 · 구역 · 도면 표기 · 확인 필요)를 붙여 사람이 확인하기 쉽게. 측정값 칸은 10개까지 */
+  var SHEET_HEAD = ['No.', 'Inspection Item', 'Standard', 'Tolerance MAX', 'Tolerance MIN', 'Inspection Equipment', "Q'ty(개수)"];
+  function sheetAoa(items, gen) {
+    var rows = (items || []).map(function (x) { var p = toPred(x), r = sheetRow(p, gen || x.gen); return { x: x, r: r, n: Math.max(1, r.count || 1) }; });
+    var K = Math.min(10, Math.max(2, Math.max.apply(null, [1].concat(rows.map(function (o) { return o.n; })))));
+    var head = SHEET_HEAD.concat(Array.from({ length: K }, function (_, i) { return '측정값 ' + (i + 1); }), ['쪽', '구역', '도면 표기', '확인 필요', '메모']);
+    var aoa = [head];
+    rows.forEach(function (o) {
+      var r = o.r, c = o.x.cand || {}, meas = [];
+      for (var i = 0; i < K; i++) meas.push(i < o.n ? '' : '-');
+      var dash = function (v) { return v == null || v === '' ? '-' : v; };
+      var memo = [c.note, o.x.note, o.n > K ? '측정값 칸은 ' + K + '개까지 — 나머지 ' + (o.n - K) + '곳은 따로 적어 주세요' : ''].filter(Boolean).join(' · ');
+      aoa.push([o.x.no, c.cat ? r.item : '(연결 못 함)', r.std, r.item === 'Weld' || r.item === 'TAP' || r.item === 'Chamfer' || r.eq === 'Visual' ? '-' : dash(r.max), r.item === 'Weld' || r.item === 'TAP' || r.item === 'Chamfer' || r.eq === 'Visual' ? '-' : dash(r.min), r.eq, o.n]
+        .concat(meas, [o.x.page, o.x.zone || '', c.raw || '', (o.x.check || c.check) ? '확인 필요' : '', memo]));
+    });
+    return aoa;
+  }
+  /* 기준값 비교용: 대문자 · 띄어쓰기 없음 · 숫자는 값으로(04 = 4, 2.0 = 2, 2,8 = 2.8) */
+  function normStd(s) {
+    return str(s).toUpperCase().replace(/(\d),(\d)/g, '$1.$2').replace(/[\s\n]+/g, '').replace(/[×✕]/g, 'X').replace(/º/g, '°')
+      .replace(/\d*\.?\d+/g, function (n) { var v = parseFloat(n); return isFinite(v) ? String(v) : n; });
+  }
+  function tolVal(v) { if (v == null || v === '' || v === '-') return null; var n = typeof v === 'number' ? v : parseFloat(String(v).replace(/,/, '.')); return isFinite(n) ? n : null; }
+  var KNOWN_ITEMS = /^(DIMENSION|HOLE|PCD|RADIUS|ANGLE|CHAMFER|TAP|ROUGHNESS|WELD|FLATNESS|STRAIGHTNESS|CYLINDRICITY|ROUNDNESS|PROFILE|PARALLELISM|PERPENDICULARITY|ANGULARITY|POSITION|CONCENTRICITY|SYMMETRY|RUNOUT|TOTALRUNOUT)$/;
+  function sameItemName(a, b) {
+    var A = str(a).toUpperCase().replace(/\s+/g, ''), B = str(b).toUpperCase().replace(/\s+/g, '');
+    if (KNOWN_ITEMS.test(A) && KNOWN_ITEMS.test(B)) return A === B;
+    if (KNOWN_ITEMS.test(A) !== KNOWN_ITEMS.test(B)) return false;
+    return noteSim(a, b) >= 0.8; // 부기 = 문장
+  }
+  function sameSheetFields(a, b) {
+    var n1 = sameItemName(a.item, b.item), n2 = normStd(a.std) === normStd(b.std);
+    var n3 = eqNum(tolVal(a.max), tolVal(b.max)) && eqNum(tolVal(a.min), tolVal(b.min));
+    return [n1, n2, n3];
+  }
+  /* 기준서 양식 정답(Standard Inspection Report) 읽기 — 머리행(No. · Inspection Item · Standard · Tolerance)을 시트 어디서나 찾고,
+     쪽마다 머리행이 되풀이돼도 번호 행을 모두 모읍니다. 반환 null = 이 양식이 아님 */
+  function parseSheetTruth(aoa, sheetName) {
+    var rows = aoa || [], col = null, items = [];
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r] || [], m = {};
+      row.forEach(function (cell, ci) {
+        var k = str(cell).replace(/\s+/g, ' ').trim();
+        if (m.no == null && /^(no\.?|번호)$/i.test(k)) m.no = ci;
+        else if (m.item == null && /^(inspection item|검사\s?항목|항목명)$/i.test(k)) m.item = ci;
+        else if (m.std == null && /^(standard|기준값?|규격)$/i.test(k)) m.std = ci;
+        else if (m.tol == null && /^(tolerance|공차)$/i.test(k)) m.tol = ci;
+        else if (m.eq == null && /^(inspection equipment|측정\s?기구|검사\s?장비)$/i.test(k)) m.eq = ci;
+      });
+      if (m.no != null && m.item != null && m.std != null) {
+        col = m;
+        // 다음 두 줄 안의 MAX · MIN 칸
+        for (var q = r + 1; q <= r + 3 && q < rows.length; q++) (rows[q] || []).forEach(function (cell, ci) { var k = str(cell).toUpperCase(); if (k === 'MAX' && col.max == null) col.max = ci; if (k === 'MIN' && col.min == null) col.min = ci; });
+        if (col.max == null && col.tol != null) { col.max = col.tol; col.min = col.tol + 1; }
+        continue;
+      }
+      if (!col) continue;
+      var no = row[col.no];
+      if (typeof no === 'string' && /^\d+$/.test(no.trim())) no = +no;
+      if (typeof no !== 'number' || !isFinite(no)) continue;
+      var it = str(row[col.item]), sd = row[col.std] == null ? '' : String(row[col.std]).trim();
+      if (!it && !sd) continue;
+      items.push({ no: no, item: it, std: sd, max: col.max != null ? row[col.max] : null, min: col.min != null ? row[col.min] : null, eq: col.eq != null ? str(row[col.eq]) : '' });
+    }
+    if (!col) return null;
+    var weld = items.some(function (x) { return /^weld$/i.test(x.item); }) || /각장|용접|weld/i.test(str(sheetName));
+    return items.map(function (x) {
+      var up = x.item.toUpperCase().replace(/\s+/g, ''), sd = x.std, t = { no: x.no, sheet: { item: x.item, std: sd, max: x.max, min: x.min, eq: x.eq }, std: weld ? 'weld' : 'dim', raw: sd, kind: '', nominal: null, upper: null, lower: null, unit: '' };
+      var mm2;
+      if (up === 'WELD') {
+        if (!sd) { t.cat = '용접 형상'; t.kind = '용접 형상'; }
+        else if ((mm2 = /^a\s*(\d+(?:[.,]\d+)?)/i.exec(sd))) { t.cat = '용접'; t.kind = '목두께'; t.nominal = +mm2[1].replace(',', '.'); }
+        else if ((mm2 = /^(\d+)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(sd))) { t.cat = '용접'; t.kind = '단속'; t.count = +mm2[1]; t.nominal = +mm2[2]; t.spec = mm2[1] + 'x' + mm2[2]; }
+        else if (/^z/i.test(sd)) { t.cat = '용접'; t.kind = '각장'; t.spec = sd.replace(/\s+/g, ' '); t.nominal = numOrNull(sd); }
+        else { t.cat = '용접'; t.kind = '용접 크기'; t.nominal = numOrNull(sd); }
+      } else if (KNOWN_ITEMS.test(up)) {
+        var kr = ITEM_KR[up] || '';
+        if (/^(FLATNESS|STRAIGHTNESS|CYLINDRICITY|ROUNDNESS|PROFILE|PARALLELISM|PERPENDICULARITY|ANGULARITY|POSITION|CONCENTRICITY|SYMMETRY|RUNOUT|TOTALRUNOUT)$/.test(up)) { t.cat = '기하공차'; t.kind = kr; t.upper = numOrNull(sd); t.lower = 0; }
+        else if (up === 'ROUGHNESS') { t.cat = '기타'; t.kind = '표면 거칠기'; t.nominal = numOrNull(sd); }
+        else if (up === 'TAP') { t.cat = '치수'; t.kind = '나사'; t.spec = sd; }
+        else if (up === 'CHAMFER') { t.cat = '치수'; t.kind = '모따기'; t.nominal = numOrNull(sd); }
+        else { t.kind = up === 'ANGLE' ? '각도' : up === 'RADIUS' ? '반지름' : up === 'HOLE' || up === 'PCD' ? '지름' : '길이'; t.nominal = numOrNull(sd); t.upper = tolVal(x.max); t.lower = tolVal(x.min); t.cat = t.upper != null ? '공차' : '치수'; }
+      } else { t.cat = '주기'; t.kind = weld ? '용접 부기' : '부기'; t.raw = (x.item + ' ' + sd).trim(); t.spec = normNote(t.raw); }
+      return t;
+    });
+  }
   /* ── 11. 일치율(정답 대조) ────────────────────────────────── */
   function catNorm(v) {
     var s = str(v).replace(/\s+/g, '');
@@ -1281,29 +1754,37 @@
   }
 
   /* mode = 'number'(풍선 번호로 짝, 목표 2) · 'value'(값으로 짝, 번호는 다를 수 있음, 목표 1) */
-  function scoreResults(pred, truth, mode) {
+  function scoreResults(pred, truth, mode, gen) {
     pred = pred || []; truth = truth || [];
     var pairs = [], usedP = {}, usedT = {};
+    // 기준서 양식 정답이면 기준서 칸(항목명 · 기준값 · 공차)으로 대조. 도구 결과는 sheetRow 로 같은 칸을 만듦
+    var sheetMode = truth.some(function (t) { return t.sheet; });
+    var ps = pred.map(function (p) { return sheetMode ? sheetRow(p, gen || p.gen) : null; });
+    function exactPair(pi, t) { return t.sheet ? sameSheetFields(ps[pi], t.sheet).every(Boolean) : sameValue(pred[pi], t); }
     if (mode === 'number') {
+      // 치수 · 용접 기준서가 섞인 정답(번호가 기준서마다 1번부터)은 기준서 + 번호로 짝
+      var mixed = truth.some(function (t) { return t.std === 'weld'; }) && truth.some(function (t) { return t.std === 'dim'; });
+      var key = function (o) { return (mixed ? (o.std === 'weld' ? 'w' : 'd') + ':' : '') + o.no; };
       var byNo = {};
-      pred.forEach(function (p, i) { if (p.no != null && byNo[p.no] == null) byNo[p.no] = i; });
+      pred.forEach(function (p, i) { if (p.no != null && byNo[key(p)] == null) byNo[key(p)] = i; });
       truth.forEach(function (t, ti) {
-        var pi = byNo[t.no];
+        var pi = byNo[key(t)];
         if (pi == null || usedP[pi]) return;
         var p = pred[pi];
         if (!p.cat && p.nominal == null && p.upper == null) return; // 풍선만 찾고 연결 못 함 = 놓침
-        usedP[pi] = usedT[ti] = 1; pairs.push({ ti: ti, pi: pi, exact: sameValue(p, t) });
+        usedP[pi] = usedT[ti] = 1; pairs.push({ ti: ti, pi: pi, exact: exactPair(pi, t) });
       });
     } else {
       truth.forEach(function (t, ti) {
-        for (var i = 0; i < pred.length; i++) if (!usedP[i] && sameValue(pred[i], t)) { usedP[i] = usedT[ti] = 1; pairs.push({ ti: ti, pi: i, exact: true }); return; }
+        for (var i = 0; i < pred.length; i++) if (!usedP[i] && exactPair(i, t)) { usedP[i] = usedT[ti] = 1; pairs.push({ ti: ti, pi: i, exact: true }); return; }
       });
       truth.forEach(function (t, ti) {
         if (usedT[ti]) return;
         for (var i = 0; i < pred.length; i++) {
           if (usedP[i]) continue;
-          var p = pred[i], ct = cmpCat(t);
-          var close = (t.nominal != null && eqNum(p.nominal, t.nominal)) || (ct === '기하공차' && cmpCat(p) === ct && eqNum(p.upper, t.upper));
+          var p = pred[i], ct = cmpCat(t), close;
+          if (t.sheet) close = !!ps[i].std && normStd(ps[i].std) === normStd(t.sheet.std) && cmpCat(p) === ct;
+          else close = (t.nominal != null && eqNum(p.nominal, t.nominal)) || (ct === '기하공차' && cmpCat(p) === ct && eqNum(p.upper, t.upper));
           if (close) { usedP[i] = usedT[ti] = 1; pairs.push({ ti: ti, pi: i, exact: false }); return; }
         }
       });
@@ -1315,21 +1796,23 @@
     var byCat = {};
     truth.forEach(function (t) { var c = cmpCat(t); byCat[c] = byCat[c] || { truth: 0, found: 0, exact: 0 }; byCat[c].truth++; });
     pairs.forEach(function (p) { var c = cmpCat(truth[p.ti]); byCat[c].found++; if (p.exact) byCat[c].exact++; });
-    var misses = truth.map(function (t, i) { return usedT[i] ? null : { no: t.no, text: itemText(t) }; }).filter(Boolean);
-    var wrong = pairs.filter(function (p) { return !p.exact; }).map(function (p) { return { no: truth[p.ti].no, truth: itemText(truth[p.ti]), pred: itemText(pred[p.pi]), predNo: pred[p.pi].no }; });
-    var extra = pred.map(function (p, i) { return usedP[i] || !(p.cat || p.nominal != null) ? null : { no: p.no, text: itemText(p) }; }).filter(Boolean);
+    function txt(it, i, isPred) { if (!sheetMode) return itemText(it); var r = isPred ? ps[i] : it.sheet; return r ? [r.item, str(r.std).replace(/\s+/g, ' '), r.max != null || r.min != null ? (r.max == null ? '-' : r.max) + '/' + (r.min == null ? '-' : r.min) : ''].filter(Boolean).join(' ') : itemText(it); }
+    var misses = truth.map(function (t, i) { return usedT[i] ? null : { no: t.no, text: txt(t, i) }; }).filter(Boolean);
+    var wrong = pairs.filter(function (p) { return !p.exact; }).map(function (p) { return { no: truth[p.ti].no, truth: txt(truth[p.ti], p.ti), pred: txt(pred[p.pi], p.pi, true), predNo: pred[p.pi].no }; });
+    var extra = pred.map(function (p, i) { return usedP[i] || !(p.cat || p.nominal != null) ? null : { no: p.no, text: txt(p, i, true) }; }).filter(Boolean);
     // 수강생 방식 일치율: 항목명 · 기준값 · 공차 필드별(비교 대상 = 정답 행, 못 찾은 행은 세 필드 모두 불일치) + 세 필드가 모두 맞은 행
     var fm = { name: 0, base: 0, tol: 0, full: 0 };
     pairs.forEach(function (pr) {
-      var a = inspFields(pred[pr.pi]), b = inspFields(truth[pr.ti]);
-      var n1 = a.name === b.name, n2 = sameField(a.base, b.base), n3 = sameField(a.tol, b.tol);
-      if (n1) fm.name++; if (n2) fm.base++; if (n3) fm.tol++; if (n1 && n2 && n3) fm.full++;
-      pr.fields = [n1, n2, n3];
+      var f3;
+      if (truth[pr.ti].sheet) f3 = sameSheetFields(ps[pr.pi], truth[pr.ti].sheet);
+      else { var a = inspFields(pred[pr.pi]), b = inspFields(truth[pr.ti]); f3 = [a.name === b.name, sameField(a.base, b.base), sameField(a.tol, b.tol)]; }
+      if (f3[0]) fm.name++; if (f3[1]) fm.base++; if (f3[2]) fm.tol++; if (f3[0] && f3[1] && f3[2]) fm.full++;
+      pr.fields = f3;
     });
     var fieldRate = { name: round(nT ? fm.name / nT : 0, 4), base: round(nT ? fm.base / nT : 0, 4), tol: round(nT ? fm.tol / nT : 0, 4) };
-    return { mode: mode, nPred: nP, nTruth: nT, tp: tp, fp: nP - tp, fn: nT - tp, precision: round(precision, 4), recall: round(recall, 4), f1: round(f1, 4),
+    return { mode: mode, sheetMode: sheetMode, nPred: nP, nTruth: nT, tp: tp, fp: nP - tp, fn: nT - tp, precision: round(precision, 4), recall: round(recall, 4), f1: round(f1, 4),
       exact: exact, valueRate: round(nT ? exact / nT : 0, 4), numberRate: round(tp ? numSame / tp : 0, 4), byCat: byCat, misses: misses, wrong: wrong, extra: extra,
-      fieldRate: fieldRate, fullRate: round(nT ? fm.full / nT : 0, 4), fullCount: fm.full };
+      fieldRate: fieldRate, fullRate: round(nT ? fm.full / nT : 0, 4), fullCount: fm.full, pairs: pairs };
   }
 
   /* ── 12. 풍선 PDF 쓰기 ────────────────────────────────────── */
@@ -1460,10 +1943,10 @@
       c.cx != null ? mm(c.cx) : null, c.cy != null ? mm(c.cy) : null, b.x != null ? mm(b.x) : null, b.y != null ? mm(b.y) : null, x.method || '',
       (x.check || c.check) ? '확인 필요' : '', [c.note, x.note].filter(Boolean).join(' · '), crop ? [mm(crop.x0), mm(crop.y0), mm(crop.x1), mm(crop.y1)].join(', ') : '', c.cat ? (stdOf(c) === 'weld' ? '용접' : '치수') : ''];
   }
-  function toPred(x) { var c = x.cand || {}; return { no: x.no, cat: c.cat === '용접' && c.kind === '용접 형상' ? '용접 형상' : c.cat, kind: c.kind, raw: c.raw, nominal: c.nominal, upper: c.upper, lower: c.lower, datum: c.datum, spec: c.spec, count: c.count, std: c.std || stdOf(c) }; }
+  function toPred(x) { var c = x.cand || {}; return { no: x.no, cat: c.cat === '용접' && c.kind === '용접 형상' ? '용접 형상' : c.cat, kind: c.kind, raw: c.raw, nominal: c.nominal, upper: c.upper, lower: c.lower, datum: c.datum, spec: c.spec, count: c.count, cls: c.cls, note: c.note, pitch: c.pitch, hole: c.hole, gen: x.gen || '', std: c.std || stdOf(c) }; }
   var DEFAULTS = {
     borderPct: 4, autoBorder: true, autoTitle: true, autoNotes: true, includeEtc: true, titleKeywords: DEFAULT_TITLE_KEYWORDS,
-    order: 'rows', bands: 6, zoneCols: 8, zoneRows: 6, startNo: 1, balloonR: 4, linkMaxMm: 15, nearMaxMm: 14, isolatedBalloons: false, target: 85, std: 'all', skipReportPages: true, borderMaxMm: 12
+    order: 'rows', bands: 6, zoneCols: 8, zoneRows: 6, startNo: 1, balloonR: 4, linkMaxMm: 15, nearMaxMm: 14, isolatedBalloons: false, target: 85, std: 'all', skipReportPages: true, borderMaxMm: 12, genTol: 'auto'
   };
   function cleanSettings(o) {
     var s = clone(DEFAULTS);
@@ -1474,6 +1957,7 @@
     if (['rows', 'cols', 'zone'].indexOf(o.order) >= 0) s.order = o.order;
     if (['all', 'dim', 'weld'].indexOf(o.std) >= 0) s.std = o.std;
     if (typeof o.titleKeywords === 'string') s.titleKeywords = o.titleKeywords;
+    if (typeof o.genTol === 'string' && /^(auto|none|13920-[ABCD]|2768-[fmcv])$/.test(o.genTol)) s.genTol = o.genTol;
     return s;
   }
   var SCHEMA_VERSION = 1;
@@ -1497,12 +1981,12 @@
 
   return {
     PT2MM: PT2MM, mm: mm, toPt: toPt, round: round, box: box, union: union, pad: pad, inBox: inBox, boxDist: boxDist, ptBoxDist: ptBoxDist, boxOverlap: boxOverlap, dist: dist, center: center,
-    mul: mul, pdfTextItems: pdfTextItems, pathsFromOpList: pathsFromOpList, readOutlineText: readOutlineText, strokeSymbols: strokeSymbols, strokeShapes: strokeShapes, _assembleGlyphs: assembleGlyphs, _readGlyphGroup: readGlyphGroup, glyphTemplates: glyphTemplates, findCircles: findCircles, findWeldTriangles: findWeldTriangles,
+    mul: mul, unspace: unspace, textCap: textCap, pdfTextItems: pdfTextItems, pathsFromOpList: pathsFromOpList, readOutlineText: readOutlineText, strokeSymbols: strokeSymbols, readStrokeText: readStrokeText, _readStrokeGlyph: readStrokeGlyph, strokeTemplates: strokeTemplates, strokeShapes: strokeShapes, _assembleGlyphs: assembleGlyphs, _readGlyphGroup: readGlyphGroup, glyphTemplates: glyphTemplates, findCircles: findCircles, findWeldTriangles: findWeldTriangles,
     normText: normText, groupTokens: groupTokens, classifyToken: classifyToken, isoFit: isoFit, GDT: GDT, CATS: CATS,
     DEFAULT_TITLE_KEYWORDS: DEFAULT_TITLE_KEYWORDS, autoExcludeBoxes: autoExcludeBoxes, isNoteLine: isNoteLine, isReportPage: isReportPage, detectCandidates: detectCandidates, makeCand: makeCand, candId: candId,
     zoneOf: zoneOf, orderCandidates: orderCandidates, placeBalloons: placeBalloons, leaderFor: leaderFor,
     detectBalloons: detectBalloons, findWeldRefs: findWeldRefs, stdOf: stdOf, normNote: normNote, leaderTarget: leaderTarget, linkBalloons: linkBalloons,
-    catNorm: catNorm, numOrNull: numOrNull, parseTruth: parseTruth, scoreResults: scoreResults, sameValue: sameValue, inspFields: inspFields,
+    catNorm: catNorm, numOrNull: numOrNull, parseTruth: parseTruth, parseSheetTruth: parseSheetTruth, sheetRow: sheetRow, sheetAoa: sheetAoa, SHEET_HEAD: SHEET_HEAD, normStd: normStd, sameSheetFields: sameSheetFields, detectGenTol: detectGenTol, genTolFor: genTolFor, genTolOf: genTolOf, scoreResults: scoreResults, sameValue: sameValue, inspFields: inspFields,
     buildBalloonPdf: buildBalloonPdf, aiPrompt: aiPrompt, parseAiAnswer: parseAiAnswer, nearText: nearText,
     ROW_HEAD: ROW_HEAD, itemRow: itemRow, toPred: toPred, DEFAULTS: DEFAULTS, cleanSettings: cleanSettings, emptyDb: emptyDb, restoreDb: restoreDb, docKey: docKey, SCHEMA_VERSION: SCHEMA_VERSION
   };

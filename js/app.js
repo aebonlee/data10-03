@@ -177,15 +177,25 @@
     r.readAsArrayBuffer(file);
   }
   function sampleMeta(key) { return SM.drawings.filter(function (d) { return d.key === key; })[0]; }
+  // ball = false(풍선 없음) · true(풍선 있음) · 'w'(풍선 있음 — 용접 기준서용, 도면 E)
   function openSample(key, ball, quiet) {
     var m = sampleMeta(key); if (!m) return;
-    var name = m.name + (ball ? '_풍선있음' : '_풍선없음') + '.pdf', skey = 'sample:' + key + (ball ? '_ball' : '_plain');
-    openBytes(b64bytes(SM.pdf[key + (ball ? '_ball' : '_plain')]), name, skey, key, quiet);
+    var suf = ball === 'w' ? '_ballw' : ball ? '_ball' : '_plain';
+    var name = m.name + (ball === 'w' ? '_풍선있음_용접' : ball ? '_풍선있음' : '_풍선없음') + '.pdf', skey = 'sample:' + key + suf;
+    if (SM.truthSheets && SM.truthSheets[key] && ball) { db.settings.std = ball === 'w' ? 'weld' : 'dim'; save(); } // 기준서마다 풍선 PDF 가 따로인 예시
+    openBytes(b64bytes(SM.pdf[key + suf]), name, skey, key, quiet);
+  }
+  /* 예시 정답: 도면 E 는 수강생 기준서 양식(시트별)이라 parseSheetTruth 로 읽음 */
+  function sampleTruth(key) {
+    if (SM.truth[key]) return SM.truth[key];
+    var out = [], sh = (SM.truthSheets || {})[key] || {};
+    Object.keys(sh).forEach(function (n) { out = out.concat(L.parseSheetTruth(sh[n], n) || []); });
+    return out;
   }
   function restoreLast() {
     var k = db.cur; if (!k) return;
-    var m = /^sample:([A-Z])_(ball|plain)$/.exec(k);
-    if (m) { openSample(m[1], m[2] === 'ball', true); return; }
+    var m = /^sample:([A-Z])_(ballw|ball|plain)$/.exec(k);
+    if (m) { openSample(m[1], m[2] === 'ballw' ? 'w' : m[2] === 'ball', true); return; }
     S.getPdf(k).then(function (bytes) { if (bytes) openBytes(bytes, db.docs[k].name, k, '', true); });
   }
 
@@ -356,11 +366,14 @@
   // ── 대시보드 ──────────────────────────────────────────────
   function sampleCards() {
     return h('div', { class: 'samples' }, SM.drawings.map(function (d) {
-      var desc = { A: '브래킷 — 치수 · 쌓인 공차 · 끼워맞춤 · 기하공차 · 나사 · 각도', B: '용접 구조물 — 용접 기호(크기 · 형상만) · 평행도', C: '축 — 끼워맞춤 · 동심도 · 흔들림 · 선으로 그린 치수 하나' }[d.key];
+      var desc = { A: '브래킷 — 치수 · 쌓인 공차 · 끼워맞춤 · 기하공차 · 나사 · 각도', B: '용접 구조물 — 용접 기호(크기 · 형상만) · 평행도', C: '축 — 끼워맞춤 · 동심도 · 흔들림 · 선으로 그린 치수 하나',
+        D: '윤곽선 글자(글자 층 없음) — 선 기호 · 쌓인 공차 · ISO 용접 기준선 · 부기', E: '한 줄 선 글꼴 · 자간 넓힌 글 · 일반공차 ISO 13920 · 2x — 정답은 수강생 기준서 양식' }[d.key];
+      var sheetStd = SM.truthSheets && SM.truthSheets[d.key];
       return h('div', { class: 'sample-card' }, h('strong', null, '예시 도면 ' + d.key), h('span', { class: 'note' }, desc),
         h('div', { class: 'btn-row' },
           h('button', { type: 'button', class: 'btn btn-sm2', onclick: function () { openSample(d.key, false); } }, '풍선 없음 → 목표 1'),
-          h('button', { type: 'button', class: 'btn btn-sm2', onclick: function () { openSample(d.key, true); } }, '풍선 있음 → 목표 2')));
+          h('button', { type: 'button', class: 'btn btn-sm2', onclick: function () { openSample(d.key, true); } }, sheetStd ? '치수 풍선 → 목표 2' : '풍선 있음 → 목표 2'),
+          sheetStd ? h('button', { type: 'button', class: 'btn btn-sm2', onclick: function () { openSample(d.key, 'w'); } }, '용접 풍선 → 목표 2') : null));
     }));
   }
   function trendChart(list, target) {
@@ -686,27 +699,32 @@
   function infoSheet(goal, items) {
     var s = settings();
     return [['항목', '값'], ['도면 파일', cur.name], ['쪽 수', cur.pages.length], ['작업', goal === 1 ? '목표 1 — 풍선 자동 배치(풍선 없는 도면)' : '목표 2 — 풍선별 정보 추출(풍선 있는 도면)'],
-      ['만든 시각', nowText()], ['기준서', STD_NAME[settings().std || 'all']], ['인식 방식', '규칙 인식 — 벡터 PDF 글자 층(없으면 칠한 윤곽선을 글자 모양과 맞춰 되읽음) + 원·지시선·기하공차 기호·용접 기준선 기하. 스캔 그림은 읽지 못함'],
+      ['만든 시각', nowText()], ['기준서', STD_NAME[settings().std || 'all']], ['인식 방식', '규칙 인식 — 벡터 PDF 글자 층(없으면 칠한 윤곽선을 글자 모양과 맞춰 되읽음) + 한 줄 선 글꼴 글자 + 원·지시선·기하공차 기호·용접 기준선 기하. 스캔 그림은 읽지 못함'],
+      ['일반공차', (items[0] && items[0].gen) ? 'ISO ' + items[0].gen.replace('-', '-') + ' — 공차를 적지 않은 치수의 Tolerance 칸' : '없음(공차를 적은 치수만 Tolerance 칸을 채움)'],
+      ['기준서 시트', '「치수 기준서」 · 「용접 기준서」 = 수강생 기준서와 같은 칸(No. · Inspection Item · Standard · Tolerance MAX/MIN · Inspection Equipment · 개수 · 측정값). 「2x」 처럼 개수가 있으면 측정값 칸을 그 수만큼 비워 둠. 「… 상세」 = 도구가 읽은 모든 칸'],
       ['항목 수', items.length], ['확인 필요', items.filter(function (x) { return x.check || (x.cand && x.cand.check); }).length], ['용접 형상', items.filter(function (x) { return x.cand && x.cand.shape; }).length],
       ['번호 순서', goal === 1 ? ({ rows: '줄', cols: '열', zone: '구역' }[s.order]) : '도면의 풍선 번호'], ['좌표', 'mm, 쪽 왼쪽 위가 (0, 0)'],
       ['주의', '이 표는 자동 인식 결과 초안입니다. 「확인 필요」 행과 연결 못 함 행은 반드시 사람이 확인해 주세요.']].concat(cur.sample ? [['예시', '가상 도면 — 실제 도면이 아님']] : []);
   }
   function exportExcel(items, goal) {
     var s = settings(), std = s.std || 'all', sheets = {};
+    // 3차: 첫 시트는 수강생 기준서와 같은 칸(No. · Inspection Item · Standard · Tolerance MAX/MIN · Inspection Equipment · 개수 · 측정값),
+    // 「… 상세」 시트는 도구가 읽은 모든 칸(구분 · 공칭 · 좌표 · 연결 방식)
+    var W2 = [6, 16, 14, 9, 9, 16, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 5, 6, 18, 9, 30];
+    function put(k, list) { sheets[STD_NAME[k]] = L.sheetAoa(list); sheets[STD_NAME[k] + ' 상세'] = [L.ROW_HEAD].concat(list.map(L.itemRow)); }
     if (std === 'all') {
       // 두 기준서를 시트로 나눔. 목표 1 은 기준서마다 1번부터 다시 매김, 목표 2 는 도면의 풍선 번호 그대로
       ['dim', 'weld'].forEach(function (k) {
-        var list = goal === 1 ? F.goal1(cur.pages, Object.assign({}, s, { std: k }), doc()) : items.filter(function (x) { return x.std === k || (!x.cand && k === 'dim'); });
-        sheets[STD_NAME[k]] = [L.ROW_HEAD].concat(list.map(L.itemRow));
+        put(k, goal === 1 ? F.goal1(cur.pages, Object.assign({}, s, { std: k }), doc()) : items.filter(function (x) { return x.std === k || (!x.cand && k === 'dim'); }));
       });
-    } else sheets[STD_NAME[std]] = [L.ROW_HEAD].concat(items.map(L.itemRow));
+    } else put(std, items);
     sheets['도면 정보'] = infoSheet(goal, items);
     var ex = [['쪽', '글자', '제외 이유']];
     cur.pages.forEach(function (p) { pageCands(p.page).excluded.forEach(function (x) { ex.push([p.page, x.raw, x.reason]); }); });
     sheets['제외된 글자'] = ex;
     var W = [6, 5, 6, 9, 11, 18, 9, 9, 9, 10, 10, 6, 6, 8, 8, 8, 10, 10, 10, 9, 30, 30, 10];
     writeXlsx(safeName(cur.name) + (goal === 1 ? '_풍선배치_' : '_풍선별정보_') + (std === 'all' ? '' : STD_NAME[std].replace(/\s/g, '') + '_') + stamp() + '.xlsx', sheets,
-      { '치수 기준서': W, '용접 기준서': W, '도면 정보': [14, 70], '제외된 글자': [5, 30, 14] });
+      { '치수 기준서': W2, '용접 기준서': W2, '치수 기준서 상세': W, '용접 기준서 상세': W, '도면 정보': [14, 70], '제외된 글자': [5, 30, 14] });
   }
   function drawBalloonsOn(ctx, k, list) {
     list.forEach(function (x) {
@@ -758,7 +776,13 @@
     var r = new FileReader();
     r.onload = function () {
       try {
-        var wb = XLSX.read(new Uint8Array(r.result), { type: 'array' }), best = null;
+        var wb = XLSX.read(new Uint8Array(r.result), { type: 'array' }), best = null, sheetItems = [], sheetNames = [];
+        // 3차: 수강생 기준서 양식(Standard Inspection Report — No. · Inspection Item · Standard · Tolerance)이면 시트마다 읽어 합침(치수 · 각장 시트)
+        wb.SheetNames.forEach(function (n) {
+          var st = L.parseSheetTruth(XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '' }), n);
+          if (st && st.length) { sheetItems = sheetItems.concat(st); sheetNames.push(n + ' ' + st.length); }
+        });
+        if (sheetItems.length) { cb({ items: sheetItems, warnings: [], sheet: '기준서 양식 — ' + sheetNames.join(' · ') }); return; }
         wb.SheetNames.forEach(function (n) {
           var t = L.parseTruth(XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '' }));
           if (t.items.length && (!best || t.items.length > best.items.length)) best = Object.assign(t, { sheet: n });
@@ -783,7 +807,7 @@
       d.truth ? h('p', null, h('strong', null, d.truth.name), ' · ' + d.truth.items.length + '개 · ' + d.truth.at, d.truth.warnings && d.truth.warnings.length ? h('span', { class: 'badge warn' }, ' 주의 ' + d.truth.warnings.length) : null)
         : h('p', { class: 'note' }, '아직 정답이 없습니다. 같은 도면을 사람이 정리한 엑셀(번호 · 구분 · 원문 또는 공칭값 · 상한 · 하한)을 올려 주세요.'),
       h('div', { class: 'btn-row' }, h('label', { class: 'btn file-btn' }, d.truth ? '정답 바꾸기' : '정답 엑셀 올리기', tIn),
-        cur.sample ? h('button', { type: 'button', class: 'btn btn-primary', onclick: function () { d.truth = { name: sampleMeta(cur.sample).name + '_정답.xlsx(예시)', items: SM.truth[cur.sample], at: nowText(), warnings: [] }; save(); render(); } }, '예시 정답 불러오기') : null,
+        cur.sample ? h('button', { type: 'button', class: 'btn btn-primary', onclick: function () { d.truth = { name: sampleMeta(cur.sample).name + '_정답.xlsx(예시)', items: sampleTruth(cur.sample), at: nowText(), warnings: [] }; save(); render(); } }, '예시 정답 불러오기') : null,
         d.truth ? h('button', { type: 'button', class: 'btn btn-danger', onclick: function () { d.truth = null; save(); render(); } }, '정답 지우기') : null));
     main.appendChild(truthCard);
     main.appendChild(h('section', { class: 'card' }, h('h2', null, '2. 무엇을 잴까'), h('div', { class: 'seg', role: 'group', 'aria-label': '측정 대상' },
@@ -794,7 +818,9 @@
     main.appendChild(stdSwitch('정답 엑셀이 치수 기준서인지 용접 기준서인지 고르면 그 기준서 항목끼리만 대조합니다.'));
     if (!d.truth) return;
     var items = mode === 'value' ? g1() : g2();
-    var sc = L.scoreResults(items.map(L.toPred), d.truth.items, mode);
+    // 기준서를 골랐고 정답에 기준서 구분(기준서 양식의 시트)이 있으면 그 기준서 정답만
+    var tItems = d.truth.items.filter(function (t) { return !t.std || (s.std || 'all') === 'all' || t.std === s.std; });
+    var sc = L.scoreResults(items.map(L.toPred), tItems, mode);
     var tgt = s.target / 100, ok = sc.valueRate >= tgt;
     main.appendChild(h('section', { class: 'card' }, h('h2', null, '3. 결과'),
       h('div', { class: 'kpis' }, kpi('값 일치율(정답 중 값까지 맞음)', pct(sc.valueRate), '', ok ? 'good' : 'bad'), kpi('정밀도', pct(sc.precision)), kpi('재현율', pct(sc.recall)), kpi('F1', pct(sc.f1)),
@@ -854,6 +880,11 @@
       h('button', { type: 'button', class: 'btn', onclick: function () { db.settings.titleKeywords = kw.value; save(); toast('저장했습니다.'); } }, '낱말 저장'),
       chk('autoNotes', '주기(NOTES) 문장 속 숫자 빼기'), chk('includeEtc', '표면 거칠기(Ra) 등 「기타」도 후보로'),
       chk('skipReportPages', '부품표 · 보고서 쪽(원 · 곡선이 하나도 없고 낱말이 많은 쪽)은 통째로 빼기')));
+    var gsel = h('select', { 'aria-label': '일반공차', onchange: function (e) { db.settings = L.cleanSettings(Object.assign({}, s, { genTol: e.target.value })); save(); toast('저장했습니다.'); } },
+      [['auto', '자동 — 도면 주기에서 찾기(ISO 13920 · ISO 2768)'], ['none', '쓰지 않음(공차를 적은 치수만)'], ['13920-A', 'ISO 13920 A'], ['13920-B', 'ISO 13920 B'], ['13920-C', 'ISO 13920 C'], ['13920-D', 'ISO 13920 D'], ['2768-f', 'ISO 2768-f'], ['2768-m', 'ISO 2768-m'], ['2768-c', 'ISO 2768-c'], ['2768-v', 'ISO 2768-v']]
+        .map(function (o) { return h('option', { value: o[0], selected: (s.genTol || 'auto') === o[0] }, o[1]); }));
+    main.appendChild(h('section', { class: 'card' }, h('h2', null, '일반공차(기준서의 Tolerance 칸)'),
+      field('공차를 적지 않은 치수에 쓸 일반공차', gsel, '기준서의 MAX · MIN 칸을 채울 때만 씁니다. 「자동」은 도면 주기의 「ISO 13920-BF」 「ISO 2768-m」 같은 글을 찾습니다. 각도는 ISO 13920 의 짧은 변 400mm 이하 구간 값.')));
     main.appendChild(h('section', { class: 'card' }, h('h2', null, '풍선 · 연결 · 목표'), h('div', { class: 'form-grid three' },
       num('balloonR', '풍선 반지름(mm)', 1.5, 12, 0.5), num('linkMaxMm', '지시선 끝 ~ 글자 최대 거리(mm)', 2, 60), num('nearMaxMm', '지시선 없는 풍선 ~ 글자 최대 거리(mm)', 2, 60),
       num('target', '목표 값 일치율(%)', 50, 100), num('zoneCols', '구역 열 수', 1, 26), num('zoneRows', '구역 행 수', 1, 20))));

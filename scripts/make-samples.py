@@ -14,6 +14,13 @@
   비스듬한 글, ISO 용접 기호(기준선 + 점선 · 선으로 그린 삼각형 · a 크기 · 개수x길이 · 기준선 아래 부기 · 양면 · 크기 없는 개선 기호),
   도면에 원래 그려진 품번 풍선(윤곽선 숫자 — 검사 풍선 아님), 검사 풍선은 색 원 + 글자 층 번호 + 빨간 지시선(가운데서 두 토막).
 
+- 도면 E(3차, 2026-10-21)는 새 실제 도면에서 드러난 형태를 지어낸 값으로 흉내 낸 가상 도면입니다: 글자 층은 있으나 CAD 가 자간을 넓혀
+  「2 6 2」 「2 7 , 5」 「± 1」 처럼 글자 사이에 빈칸을 넣음, 주기의 일반공차(ISO 13920-BF), 선으로 그은 Φ(꺾은선 원) · ⏤(진직도),
+  한 줄 선 글꼴(파랑 · 회색, 도구의 참조와 다른 꼴로 직접 그림)로 쓴 치수 「125」 · 용접 크기 「a4」 · 부기 「DO NOT GRIND」 · 글자 층 「16」 앞의 선 글자 「M」,
+  「2x」 개수, 양쪽 각장 「z6 z8」, J 형 용접 기호(세로선 + 호, 크기 없음), 함정(꺾은선 원 안 품번 「5」, 숨은선이 붙은 긴 외형선 + 작은 네모).
+  정답은 수강생 기준서 양식(No. · Inspection Item · Standard · Tolerance MAX/MIN · Inspection Equipment, 치수 · 각장 시트가 따로, 번호도 따로)이고,
+  풍선 있는 PDF 도 치수용(_풍선있음) · 용접용(_풍선있음_용접) 두 개입니다.
+
 출력: samples/*.pdf · samples/*_정답.xlsx · js/sample-pdfs.js(브라우저에서 바로 여는 base64 사본)
 """
 import base64
@@ -737,11 +744,177 @@ def drawing_d(s):
     ]
 
 
+# 한 줄 선 글꼴(가상 CAD 선 글꼴) — 도구의 참조(js/logic.js STROKE_FONT)와 일부러 다른 꼴로 직접 그림(팔각형 0 · 각진 2 · 5 …).
+# 단위: 대문자 높이 10, 기준선 0, 위로 +. 글자 사이 간격 = 폭 + 2.4
+SFONT = {
+    '0': ([[(1, 0), (5, 0), (6, 2), (6, 8), (5, 10), (1, 10), (0, 8), (0, 2), (1, 0)]], 6),
+    '1': ([[(1.5, 8.5), (3, 10), (3, 0)]], 4),
+    '2': ([[(0, 8), (1, 10), (5, 10), (6, 8), (6, 6.5), (0, 0), (6, 0)]], 6),
+    '4': ([[(5, 0), (5, 10), (0, 3.2), (6.2, 3.2)]], 6.2),
+    '5': ([[(6, 10), (1, 10), (0.5, 5.5), (4.5, 6), (6, 4.5), (6, 1.5), (4.5, 0), (1.5, 0), (0, 1.2)]], 6),
+    '6': ([[(5.5, 9), (4.5, 10), (1.5, 10), (0, 8), (0, 2), (1.5, 0), (4.5, 0), (6, 1.5), (6, 4), (4.5, 5.5), (1.5, 5.5), (0, 4)]], 6),
+    'a': ([[(0.5, 6), (2, 7), (4, 7), (5, 6), (5, 0)], [(5, 3.5), (1.5, 3.5), (0, 2.2), (0.3, 0.6), (1.8, 0), (3.5, 0), (5, 1.2)]], 5),
+    'D': ([[(0, 0), (0, 10), (3.5, 10), (5.5, 8.5), (6, 5), (5.5, 1.5), (3.5, 0), (0, 0)]], 6),
+    'O': ([[(1.2, 0), (5.4, 0), (6.6, 2), (6.6, 8), (5.4, 10), (1.2, 10), (0, 8), (0, 2), (1.2, 0)]], 6.6),
+    'N': ([[(0, 0), (0, 10), (6, 0), (6, 10)]], 6),
+    'T': ([[(0, 10), (6.4, 10)], [(3.2, 10), (3.2, 0)]], 6.4),
+    'G': ([[(6, 8.5), (5, 10), (1.5, 10), (0, 8), (0, 2), (1.5, 0), (5, 0), (6, 1.5), (6, 4.5), (3.5, 4.5)]], 6),
+    'R': ([[(0, 0), (0, 10), (4.5, 10), (6, 8.5), (6, 6.8), (4.5, 5.2), (0, 5.2)], [(3.5, 5.2), (6, 0)]], 6),
+    'I': ([[(0, 0), (0, 10)]], 0),
+    'M': ([[(0, 0), (0, 10), (3.3, 3.5), (6.6, 10), (6.6, 0)]], 6.6),
+}
+GRAY = Color(0.45, 0.45, 0.45)
+
+
+class StrokeSheet(Sheet):
+    """글자 층(DejaVu) 도면 + 한 줄 선 글꼴 · 꺾은선 기호 · 풍선 도구 풍선(도면 E)"""
+
+    def stroke_text(self, x, y, s, hh=3.0, color=GRAY, lw=0.18):
+        """선 글꼴 글: (x, y) = 기준선 시작(mm), hh = 대문자 높이(mm). 반환 = 폭(mm)"""
+        k = hh / 10
+        c = self.c
+        c.saveState()
+        c.setStrokeColor(color)
+        ox = x
+        for ch in s:
+            if ch == ' ':
+                ox += 5.0 * k
+                continue
+            strokes, w = SFONT[ch]
+            for pl in strokes:
+                self.poly([(ox + px * k, y - py * k) for px, py in pl], close=False, lw=lw)
+            ox += (w + 2.4) * k
+        c.restoreState()
+        return ox - x - 2.4 * k
+
+    def poly_circle(self, cx, cy, r, n=24, lw=0.18):
+        """곡선이 아니라 꺾은선(점 n 개)으로 그린 원 — 선 글꼴 Φ · 품번 풍선"""
+        self.poly([(cx + r * math.cos(2 * math.pi * t / n), cy + r * math.sin(2 * math.pi * t / n)) for t in range(n + 1)], close=False, lw=lw)
+
+    def sym_phi(self, x, y, hh):
+        """Φ: 꺾은선 원 + 조금 기운 세로선. (x, y) = 기준선 왼쪽. 반환 = 폭"""
+        r = hh * 0.36
+        cx, cy = x + r, y - hh / 2
+        self.poly_circle(cx, cy, r)
+        self.line(cx - r * 0.2, y, cx + r * 0.2, y - hh, 0.18)
+        return 2 * r + hh * 0.3
+
+    def real_text(self, x, y, s, size, color):
+        Sheet.text(self, x, y, s, size, anchor='middle', color=color)
+
+    weld_ref = OutlineSheet.weld_ref
+    ix_balloon = OutlineSheet.ix_balloon
+
+
+def drawing_e(s):
+    """A3 용접 브래킷 WB-500 — 3차: 자간 넓힌 글자 층 · 일반공차 ISO 13920-BF · 선 글꼴 · Φ · ⏤ · 2x · z6 z8 · J 기호.
+    반환 = [{'std': 'dim'|'weld', 'no', 'sheet': (Inspection Item, Standard, MAX, MIN, Equipment), 'b': 풍선, 't': 지시선 끝}] — 값은 모두 지어낸 것"""
+    HH = 12 * 0.729 / MM
+    BLUE2 = Color(0.1, 0.25, 0.75)
+    # 형상
+    s.rect(60, 70, 120, 40, 0.35)
+    s.rect(200, 70, 60, 40, 0.35)
+    # D1 262 — 자간 넓힌 글(「2 6 2」), 공차 없음 → 일반공차 ISO 13920-BF(120~400: ±2)
+    s.dim_h(60, 180, 58, y_from=69)
+    s.text(112, 56, '2 6 2', 12)
+    # D2 27,5 ±1 — 자간 넓힌 「2 7 , 5」 와 「± 1」 이 따로
+    s.dim_h(200, 212.5, 58, y_from=69)
+    w = s.text(199, 56, '2 7 , 5', 12)
+    s.text(199 + w + 1.5, 56, '± 1', 12)
+    # D3 Φ71 +0,046/0 — Φ 는 꺾은선 원 + 세로선, 공차는 같은 크기로 위아래
+    s.line(120, 110, 100, 128, 0.2)
+    s.arrow(120, 110, 0.74, -0.67)
+    s.line(100, 128, 60, 128, 0.2)
+    x = 62
+    x += s.sym_phi(x, 126.5, HH)
+    w = s.text(x, 126.5, '71', 12)
+    s.text(x + w + 2.0, 126.5, '0', 12)
+    s.text(x + w + 2.0, 126.5 - HH - 2.0, '+0,046', 12)
+    # D4 2x M20 — 「M」 만 선 글꼴(검정 · 글자 층 「20」 바로 앞)
+    s.line(150, 110, 140, 150, 0.2)
+    s.line(140, 150, 110, 150, 0.2)
+    w2 = s.text(112, 148.5, '2x', 12)
+    wm = s.stroke_text(112 + w2 + 1.8, 148.5, 'M', HH, color=black)
+    s.text(112 + w2 + 1.8 + wm + 0.9, 148.5, '20', 12)
+    # D5 진직도 ⏤ 0,3 — 틀 첫 칸에 가로선 하나
+    s.rect(272, 120, 7, 7, 0.18)
+    s.line(273.8, 123.5, 277.2, 123.5, 0.18)
+    s.rect(279, 120, 13, 7, 0.18)
+    s.text(280.5, 125.0, '0,3', 12)
+    s.line(272, 123.5, 262, 105, 0.15)
+    # D6 146 — 파란 한 줄 선 글꼴(글자 층 없음), 공차 없음 → ±2
+    s.dim_h(200, 325, 168, y_from=111)
+    s.stroke_text(255, 166, '146', HH, color=BLUE2)
+    # D7 2x Ø11 H7 — 글자 층 한 줄(개수 2)
+    s.circle(230, 90, 6.5, 0.3)
+    s.line(234.6, 85.4, 245, 78, 0.2)
+    s.line(245, 78, 270, 78, 0.2)
+    s.text(246, 76.5, '2x Ø11 H7', 12)
+    # 용접 W1 a4 ◺ — 회색 선 글꼴 「a4」, 아래 부기 「DO NOT GRIND」(선 글꼴)
+    s.weld_ref(75, 186, 55, 196, 44, [(-1, 'fillet', 26)])
+    s.stroke_text(58, 194.2, 'a4', HH)
+    s.stroke_text(57, 202.8, 'DO NOT GRIND', 2.6)
+    # 용접 W2 z6 z8 ◺(글자 층)
+    s.weld_ref(165, 186, 140, 196, 50, [(-1, 'fillet', 36)])
+    s.text(142, 194.5, 'z6 z8', 12)
+    # 용접 W3 J 형 기호(세로선 + 호) — 크기 글자 없음 → 용접 형상
+    s.weld_ref(245, 186, 225, 196, 34, [])
+    s.line(244, 196, 244, 191, 0.2)
+    s.poly([(244, 193.6), (245.2, 193.5), (246.3, 193.0), (247.1, 192.2), (247.6, 191.1), (247.7, 190.0)], close=False, lw=0.2)
+    # 함정: 꺾은선 원 안 품번 「5」(검사 항목 아님) — 용접 W2 기준선 위 오른쪽
+    s.poly_circle(181, 186.5, 3.6, lw=0.25)
+    s.text(181 - s.width('5', 12) / 2, 186.5 + HH / 2, '5', 12)
+    s.line(183.5, 189.2, 186, 192, 0.2)
+    # 함정: 숨은선(점선)이 1mm 아래 붙은 긴 외형선 + 그 선에 붙은 작은 네모(화살 · 꼬리 없음 → 용접 기준선 아님)
+    s.line(60, 226, 180, 226, 0.35)
+    xx = 61
+    while xx < 178:
+        s.line(xx, 227, xx + 1.2, 227, 0.13)
+        xx += 2.0
+    s.rect(150, 220, 3, 6, 0.25)
+
+    s.frame('WELD BRACKET', 'WB-500', '1:2', 'S355', ['1. WELDED CONSTRUCTION TOLERANCES ISO 13920-BF', '2. REMOVE ALL BURRS'])
+    return [
+        {'std': 'dim', 'no': 1, 'sheet': ('Dimension', '262', 2, -2, 'CMM'), 'b': (126, 44), 't': (120, 52)},
+        {'std': 'dim', 'no': 2, 'sheet': ('Dimension', '27.5', 1, -1, 'CMM'), 'b': (204, 42), 't': (204, 51)},
+        {'std': 'dim', 'no': 3, 'sheet': ('Hole', '71', 0.046, 0, 'CMM'), 'b': (76, 140), 't': (72, 130)},
+        {'std': 'dim', 'no': 4, 'sheet': ('TAP', 'M20x2.5', '-', '-', 'Plug Gage'), 'b': (118, 160), 't': (121, 151)},
+        {'std': 'dim', 'no': 5, 'sheet': ('Straightness', '0.3', 0, -0.3, 'CMM'), 'b': (300, 123.5), 't': (292, 123.5)},
+        {'std': 'dim', 'no': 6, 'sheet': ('Dimension', '146', 2, -2, 'CMM'), 'b': (262, 180), 't': (259, 169)},
+        {'std': 'dim', 'no': 7, 'sheet': ('Hole', '11', 0.018, 0, 'CMM'), 'b': (262, 64), 't': (258, 73)},
+        {'std': 'weld', 'no': 1, 'sheet': ('Weld', 'a4\n(06x06)', '-', '-', 'Leg Length\nGage'), 'b': (50, 180), 't': (60, 191)},
+        {'std': 'weld', 'no': 2, 'sheet': ('Weld', 'z6 z8', '-', '-', 'Steel Ruler'), 'b': (130, 178), 't': (146, 191)},
+        {'std': 'weld', 'no': 3, 'sheet': ('DO NOT GRIND', None, '-', '-', 'Visual'), 'b': (44, 210), 't': (56, 201)},
+        {'std': 'weld', 'no': 4, 'sheet': ('Weld', None, '-', '-', 'Visual'), 'b': (258, 178), 't': (247, 189)},
+    ]
+
+
+def write_sheet_answer(path, items):
+    """수강생 기준서 양식(Standard Inspection Report)과 같은 칸: 머리행 2줄(Tolerance 아래 MAX · MIN), 치수 · 각장 시트가 따로"""
+    wb = Workbook()
+    wb.remove(wb.active)
+    for std, title in (('dim', '치수'), ('weld', '각장')):
+        ws = wb.create_sheet(title)
+        ws.append(['Standard Inspection Report For Dimension (예시 — 가상 도면, 지어낸 값)'])
+        ws.append([])
+        ws.append(['No.', 'Inspection Item', 'Standard', 'Tolerance', '', 'Inspection Equipment', "Q'ty of Sample", 'Checking Sample'])
+        ws.append(['', '', '', 'MAX', 'MIN', '', '', 1, 2])
+        for it in items:
+            if it['std'] != std:
+                continue
+            item, sd, mx, mn, eq = it['sheet']
+            ws.append([it['no'], item, sd, mx, mn, eq, '○'])
+        for col, w in zip('ABCDEFGHI', (6, 18, 14, 8, 8, 18, 10, 8, 8)):
+            ws.column_dimensions[col].width = w
+    wb.save(str(path))
+
+
 DRAWINGS = [
     ('A', '도면A_브래킷', 420, 297, drawing_a),
     ('B', '도면B_용접구조물', 420, 297, drawing_b),
     ('C', '도면C_축', 297, 210, drawing_c),
     ('D', '도면D_윤곽선글자', 420, 297, drawing_d),
+    ('E', '도면E_선글꼴_기준서양식', 420, 297, drawing_e),
 ]
 
 
@@ -769,13 +942,35 @@ def main():
     SAMPLES.mkdir(exist_ok=True)
     js = {}
     truth = {}
+    sheets = {}
     for key, name, w, h, fn in DRAWINGS:
         plain = SAMPLES / (name + '_풍선없음.pdf')
         ball = SAMPLES / (name + '_풍선있음.pdf')
-        K = OutlineSheet if key == 'D' else Sheet
+        K = OutlineSheet if key == 'D' else StrokeSheet if key == 'E' else Sheet
         s = K(plain, w, h)
         items = fn(s)
         s.save()
+        if key == 'E':
+            # 기준서 양식: 치수 · 용접 풍선 PDF 가 따로(번호도 기준서마다 1번부터)
+            ballw = SAMPLES / (name + '_풍선있음_용접.pdf')
+            for path_, std in ((ball, 'dim'), (ballw, 'weld')):
+                s2 = K(path_, w, h)
+                fn(s2)
+                for it in items:
+                    if it['std'] == std:
+                        s2.ix_balloon(it['b'][0], it['b'][1], it['no'], it['t'])
+                s2.save()
+            write_sheet_answer(SAMPLES / (name + '_정답.xlsx'), items)
+            js[key + '_plain'] = base64.b64encode(plain.read_bytes()).decode()
+            js[key + '_ball'] = base64.b64encode(ball.read_bytes()).decode()
+            js[key + '_ballw'] = base64.b64encode(ballw.read_bytes()).decode()
+            sheets[key] = {}
+            for std, title in (('dim', '치수'), ('weld', '각장')):
+                aoa = [['No.', 'Inspection Item', 'Standard', 'Tolerance', '', 'Inspection Equipment'], ['', '', '', 'MAX', 'MIN', '']]
+                aoa += [[it['no']] + list(it['sheet']) for it in items if it['std'] == std]
+                sheets[key][title] = aoa
+            print(name, '검사 항목', len(items), '개(치수 · 용접) ·', plain.stat().st_size, '/', ball.stat().st_size, '/', ballw.stat().st_size, 'bytes')
+            continue
         s2 = K(ball, w, h)
         fn(s2)
         for it in items:
@@ -794,10 +989,12 @@ def main():
     out = ROOT / 'js' / 'sample-pdfs.js'
     out.write_text(
         '/* 예시 도면(가상) — scripts/make-samples.py 로 만든 PDF 의 base64 사본과 정답입니다.\n'
+        '   truthSheets = 수강생 기준서 양식 정답(도면 E, 시트별 2차원 배열 — DRLogic.parseSheetTruth 로 읽음).\n'
         '   로컬 파일(file://)로 열어도 「예시 도면 열기」가 되도록 담았습니다. 직접 고치지 말고 스크립트를 다시 돌리세요. */\n'
         '(function (root) {\n  root.DRSample = {\n'
         '    drawings: ' + json.dumps(meta, ensure_ascii=False) + ',\n'
         '    truth: ' + json.dumps(truth, ensure_ascii=False) + ',\n'
+        '    truthSheets: ' + json.dumps(sheets, ensure_ascii=False) + ',\n'
         '    pdf: ' + json.dumps(js) + '\n  };\n'
         '  if (typeof module === \'object\' && module.exports) module.exports = root.DRSample;\n'
         '})(typeof self !== \'undefined\' ? self : this);\n', encoding='utf-8')

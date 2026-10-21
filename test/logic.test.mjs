@@ -2,6 +2,8 @@
 // 실제 회사 도면은 리포에 넣지 않습니다. 가상 글자 조각과 scripts/make-samples.py 로 만든 가상 도면 4종으로 검사합니다.
 // 도면 D(2차) = 실제 도면 2장에서 드러난 틀림 유형(글자 층 없는 윤곽선 글자 · 선으로 그린 Ø/×/°/기하공차 기호 · 같은 크기로 쌓인 공차 ·
 //              떨어진 ±1 · ISO 용접 기준선 · a 크기 · 개수x길이 · 부기 · 양면 · 형상만 · 품번 풍선 · 빨간 두 토막 지시선)을 흉내 낸 가상 도면.
+// 도면 E(3차) = 새 실제 도면 2종에서 드러난 유형(자간 넓힌 글자 층 · 일반공차 ISO 13920 · 한 줄 선 글꼴 · 꺾은선 Φ · ⏤ · 2x · 양쪽 각장 z · J 기호)을
+//              지어낸 값으로 흉내 낸 가상 도면. 정답은 수강생 기준서 양식(시트 치수 · 각장).
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
@@ -397,9 +399,183 @@ test('수강생 방식 일치율: 필드(항목명 · 기준값 · 공차) 일�
   assert.equal(sc.exact, 3);
 });
 
-section('예시 도면 4종 — 전체 흐름(pdf.js)');
+section('3차 — 새 도면 2종에서 드러난 것(자간 · 일반공차 · 기준서 양식 · 2x · 한 줄 선 글꼴)');
+const pagesE = await M.readPages(lib, Buffer.from(Sample.pdf['E_plain'], 'base64'));
+const pagesEb = await M.readPages(lib, Buffer.from(Sample.pdf['E_ball'], 'base64'));
+const pagesEw = await M.readPages(lib, Buffer.from(Sample.pdf['E_ballw'], 'base64'));
+const truthE = M.sampleSheetTruth('E');
+test('자간을 넓힌 글자 층(「2 6 2」 「2 7 , 5」 「± 1」)은 빈칸을 빼고 읽음 · 낱말 사이 빈칸은 그대로', () => {
+  assert.equal(L.unspace('2 6 2'), '262'); assert.equal(L.unspace('2 7 , 5'), '27,5'); assert.equal(L.unspace('± 1'), '±1');
+  assert.equal(L.unspace('SEE VIEW A'), 'SEE VIEW A'); assert.equal(L.unspace('2x M20'), '2x M20');
+  const toks = pagesE[0].tokens.map(t => t.str);
+  for (const want of ['262', '27.5 ±1']) assert.ok(toks.includes(want), want + ' 없음: ' + toks.join(' | '));
+});
+test('일반공차: 주기의 ISO 13920-BF 를 찾아 공차 없는 치수의 Tolerance 칸을 채움(2mm 미만 · 공차 적은 치수는 그대로)', () => {
+  assert.equal(L.detectGenTol(pagesE), '13920-B');
+  assert.equal(L.detectGenTol([{ items: [{ str: 'GENERAL TOLERANCES ISO 2768-mK' }] }]), '2768-m');
+  assert.equal(L.detectGenTol([{ items: [{ str: 'GENERAL TOLERANCE ±0.5' }] }]), '');
+  const g = (n, a) => L.genTolOf('13920-B', n, a);
+  assert.deepEqual([g(16.5), g(47), g(262), g(640), g(1300), g(0), g(1.5), g(28, true)], [1, 2, 2, 3, 4, null, null, 0.75]);
+  assert.equal(L.genTolOf('2768-m', 50), 0.3);
+  const row = raw => { const c = L.classifyToken(raw); return L.sheetRow(Object.assign({ raw }, c), '13920-B'); };
+  assert.deepEqual([row('262').max, row('262').min], [2, -2]);
+  assert.deepEqual([row('284 ±1').max, row('284 ±1').min], [1, -1]);
+  assert.deepEqual([row('28°').item, row('28°').max], ['Angle', 0.75]);
+  assert.equal(L.sheetRow(Object.assign({}, L.classifyToken('262')), '').max, null); // 일반공차를 쓰지 않으면 빈칸
+  assert.equal(L.cleanSettings({ genTol: 'none' }).genTol, 'none'); assert.equal(L.cleanSettings({ genTol: 'x' }).genTol, 'auto');
+  assert.equal(L.genTolFor(pagesE, L.cleanSettings({ genTol: 'none' })), '');
+});
+test('기준서 양식 칸: 항목명 · 기준값 · MAX/MIN · 측정 기구를 수강생 기준서처럼', () => {
+  const row = raw => { const c = L.classifyToken(raw); return L.sheetRow(Object.assign({ raw }, c), '13920-B'); };
+  const pick = r => [r.item, r.std, r.max, r.min, r.eq];
+  assert.deepEqual(pick(row('Ø71 +0.046/0')), ['Hole', '71', 0.046, 0, 'CMM']);
+  assert.deepEqual(pick(row('47 F8')).slice(0, 2), ['Hole', '47']);
+  assert.deepEqual(pick(row('M20')), ['TAP', 'M20x2.5', null, null, 'Plug Gage']);
+  assert.deepEqual(pick(row('2x M20 x28')).slice(0, 2), ['TAP', 'M20x2.5']); // x28 = 깊이(피치 아님)
+  assert.equal(row('2x M20 x28').count, 2);
+  assert.deepEqual(pick(row('⊥ Ø0.6 B')), ['Perpendicularity', '0.6', 0, -0.6, 'CMM']);
+  assert.deepEqual(pick(row('Rzmax3.2')), ['Roughness', '3.2', 0, -3.2, 'Roughness\nMeasurement']);
+  assert.deepEqual(pick(row('a4.6')), ['Weld', 'a4.6\n(07x07)', null, null, 'Leg Length Gage']);
+  assert.deepEqual(pick(row('a6.6')).slice(1, 2), ['a6.6\n(09x09)']);
+  assert.deepEqual(pick(row('z6 z8')).slice(0, 2), ['Weld', 'z6 z8']);
+  assert.deepEqual(pick(row('3x25(180°)')).slice(0, 2), ['Weld', '3x25']);
+  assert.deepEqual(pick(row('1.5 x 45°')).slice(0, 2), ['Chamfer', '1.5x45°']);
+  assert.deepEqual(pick(L.sheetRow({ cat: '용접 형상', kind: '용접 형상' })), ['Weld', '', null, null, 'Visual']);
+  assert.deepEqual(pick(L.sheetRow({ cat: '주기', kind: '용접 부기', raw: 'NO PAINT  ZONE B' })).slice(0, 2), ['NO PAINT ZONE B', '']);
+  assert.equal(L.normStd('a4,6\n(07x07)'), L.normStd('a4.6 (7x7)')); assert.equal(L.normStd('M24x3.0'), L.normStd('M24x3'));
+});
+test('정답 기준서 양식 읽기: 쪽마다 되풀이되는 머리행 · Tolerance 아래 MAX/MIN · 시트별 치수/용접, 기준서 칸으로 대조', () => {
+  const head = [['No.', 'Inspection \nItem', 'Standard', 'Tolerance', '', 'Inspection\nEquipment'], ['', '', '', 'MAX', 'MIN', '']];
+  const aoa = [['Standard Inspection Report For Dimension'], ...head, [1, 'Dimension', '47', 1, -1, 'CMM'], [2, 'Flatness', '1.5', 0, -1.5, 'CMM'], [], ['Standard Inspection Report For Dimension'], ...head, [3, 'Hole', '71', 0.046, 0, 'CMM'], [4, 'TAP', 'M20x2.5', '-', '-', 'Plug Gage']];
+  const t = L.parseSheetTruth(aoa, '치수');
+  assert.deepEqual(t.map(x => x.no), [1, 2, 3, 4]);
+  assert.deepEqual(t.map(x => x.cat), ['공차', '기하공차', '공차', '치수']);
+  const w = L.parseSheetTruth([...head, [1, 'Weld', 'a4.6\n(07x07)', '-', '-', 'Leg Length\nGage'], [2, 'Weld', '', '-', '-', 'Visual'], [3, 'ZONE B AREA', '', '-', '-', 'Visual'], [4, 'Weld', '3x25', '-', '-', 'Steel Ruler']], '각장');
+  assert.deepEqual(w.map(x => [x.std, x.cat, x.kind]), [['weld', '용접', '목두께'], ['weld', '용접 형상', '용접 형상'], ['weld', '주기', '용접 부기'], ['weld', '용접', '단속']]);
+  assert.equal(L.parseSheetTruth([['번호', '구분', '원문'], [1, '치수', '120']]), null); // 1 · 2차 정답 양식은 그대로 parseTruth 로
+  // 치수 · 용접 정답이 섞이면(번호가 기준서마다 1번부터) 기준서 + 번호로 짝
+  const pred = [{ no: 1, std: 'dim', cat: '공차', kind: '길이', raw: '47 ±1', nominal: 47, upper: 1, lower: -1 }, { no: 1, std: 'weld', cat: '용접', kind: '목두께', raw: 'a4.6', nominal: 4.6 },
+    { no: 2, std: 'dim', cat: '기하공차', kind: '평면도', raw: '▱ 1.5', upper: 1.5, lower: 0 }, { no: 2, std: 'weld', cat: '용접 형상', kind: '용접 형상' }, { no: 3, std: 'weld', cat: '주기', kind: '용접 부기', raw: 'ZONE  B AREA' }];
+  const sc = L.scoreResults(pred, t.concat(w), 'number');
+  assert.equal(sc.sheetMode, true);
+  assert.equal(sc.fullCount, 5); assert.deepEqual(sc.misses.map(m => m.no), [3, 4, 4]);
+  assert.deepEqual(sc.fieldRate, { name: 0.625, base: 0.625, tol: 0.625 });
+});
+test('「2x」 = 같은 Spec 실측값 2개 — 옆 항목의 개수로 붙이고, 기준서 엑셀에 측정값 칸을 그 수만큼 비워 둠', () => {
+  const tok = (id, str, x, y) => ({ id, str, cx: x + 10, cy: y, h: 10, a: 0, box: L.box(x, y - 8, x + 20, y + 2) });
+  const pg = { page: 1, w: 842, h: 595, tokens: [tok('t1', '2x', 200, 300), tok('t2', 'Ø29.5', 224, 300), tok('t3', '3x', 400, 100), tok('t4', '83.5', 520, 100)], circles: [{ cx: 1, cy: 1, r: 3 }], refs: [] };
+  const c = L.detectCandidates(pg, L.cleanSettings(), {}).cands;
+  assert.equal(c.find(x => x.raw === 'Ø29.5').count, 2);
+  assert.equal(c.find(x => x.raw === '83.5').count, null); // 멀리 떨어진 「3x」 는 붙이지 않음
+  const items = [{ no: 1, page: 1, cand: { cat: '치수', kind: '지름', raw: 'Ø29.5', nominal: 29.5, count: 2 } }, { no: 2, page: 1, cand: { cat: '용접', kind: '목두께', raw: 'a4.6', nominal: 4.6 } }];
+  const aoa = L.sheetAoa(items, '13920-B');
+  assert.deepEqual(aoa[0].slice(0, 9), ['No.', 'Inspection Item', 'Standard', 'Tolerance MAX', 'Tolerance MIN', 'Inspection Equipment', "Q'ty(개수)", '측정값 1', '측정값 2']);
+  assert.deepEqual(aoa[1].slice(0, 9), [1, 'Hole', '29.5', 1, -1, 'CMM', 2, '', '']);
+  assert.deepEqual(aoa[2].slice(0, 9), [2, 'Weld', 'a4.6\n(07x07)', '-', '-', 'Leg Length Gage', 1, '', '-']);
+  const goal2 = F.goal2(pagesEb, L.cleanSettings({ std: 'dim' }), {});
+  assert.deepEqual(goal2.filter(x => x.cand && x.cand.count > 1).map(x => x.no), [4, 7]);
+});
+test('한 줄 선 글꼴: 선으로 그은 글자를 읽음(참조와 다른 꼴) · 글자 층 앞 선 글자 「M」 · 빗금 · 평행선 · 되풀이 X 는 글로 만들지 않음', () => {
+  // 시험용 선 글꼴(도구 참조와도, 예시 도면 E 의 글꼴과도 다른 꼴): 대문자 높이 10 → 8pt
+  const G = { '3': [[[0.4, 9], [1.6, 10], [4.6, 10], [5.8, 8.8], [5.8, 6.6], [4.4, 5.3], [2.4, 5.3]], [[4.4, 5.3], [6, 3.8], [6, 1.4], [4.6, 0], [1.4, 0], [0.2, 1.3]]], '7': [[[0, 10], [6, 10], [2.4, 0]]], '0': [[[1.2, 0], [4.8, 0], [6, 2.4], [6, 7.6], [4.8, 10], [1.2, 10], [0, 7.6], [0, 2.4], [1.2, 0]]] };
+  const k = 0.8, paints = [];
+  const draw = (s, x0, y0, rot) => { let ox = 0; for (const ch of s) { const subs = G[ch].map(pl => ({ pts: pl.map(([px, py]) => { const u = ox + px * k, v = -py * k; return rot ? [x0 + v, y0 - u] : [x0 + u, y0 + v]; }), curves: 0, closed: false })); paints.push({ pid: paints.length, kind: 's', stroke: '128,128,128', subs }); ox += (6 + 2.2) * k; } };
+  draw('370', 100, 200, false); draw('73', 300, 400, true);
+  for (let i = 0; i < 6; i++) paints.push({ pid: paints.length, kind: 's', subs: [{ pts: [[500 + i * 4, 100], [506 + i * 4, 90]], curves: 0 }] }); // 빗금
+  for (let i = 0; i < 3; i++) paints.push({ pid: paints.length, kind: 's', subs: [{ pts: [[600 + i * 3.5, 100], [600 + i * 3.5, 92]], curves: 0 }] }); // 짧은 세로 평행선(「111」 아님)
+  for (let i = 0; i < 3; i++) paints.push({ pid: paints.length, kind: 's', subs: [{ pts: [[700 + i * 8, 100], [706 + i * 8, 92]], curves: 0 }, { pts: [[700 + i * 8, 92], [706 + i * 8, 100]], curves: 0 }] }); // 빗금 교차(「XXX」 아님)
+  const r = L.readStrokeText(paints, [], 8, 1);
+  assert.deepEqual(r.items.map(i => i.str).sort(), ['370', '73']);
+  const v = r.items.find(i => i.str === '73');
+  assert.ok(Math.abs(Math.abs(v.a) - Math.PI / 2) < 0.01, '세로 선 글자 ' + v.a);
+  // 글자 층 「20」 바로 앞의 선 글자 「M」(가운데가 중간까지만 내려오는 꼴)
+  const text = [{ id: 'i1', page: 1, str: '20', x: 210, y: 300, w: 13, h: 12, a: 0, box: L.box(210, 290.4, 223, 302.6) }];
+  const mP = [{ pid: 0, kind: 's', subs: [{ pts: [[200.6, 300], [200.6, 291.4], [204.2, 296.0], [207.8, 291.4], [207.8, 300]], curves: 0 }] }];
+  assert.equal(L.readStrokeText(mP, text, 8.6, 1).items[0].str, 'M20');
+  const toks = pagesE[0].tokens.map(t => t.str);
+  for (const want of ['146', 'a4', '2x M20']) assert.ok(toks.includes(want), want + ' 없음: ' + toks.join(' | '));
+  assert.ok(toks.some(t => L.normNote(t).replace(/\s/g, '') === 'DONOTGRIND'), '선 글꼴 부기');
+});
+test('선 기호: 꺾은선 원 Φ · ⏤ 진직도 — 기하공차 기호는 칸 글자도 틀 안이고 두 칸이 한 변을 함께 쓸 때만(구멍 중심 표시 옆 치수는 아님)', () => {
+  const toks = pagesE[0].tokens.map(t => t.str);
+  for (const want of ['Ø71', '⏤ 0.3']) assert.ok(toks.some(t => t.startsWith(want)), want + ' 없음: ' + toks.join(' | '));
+  assert.deepEqual([L.classifyToken('⏤ 0.3').kind, L.classifyToken('⏤ 0.3').upper], ['진직도', 0.3]);
+  // 원 + 십자(⌖ 모양 구멍 중심 표시) 바로 옆의 세로 치수 「146」 — 틀 칸이 없으니 기호가 아님
+  const c = { cx: 100, cy: 200, r: 3 }, circ = []; for (let i = 0; i <= 24; i++) circ.push([c.cx + c.r * Math.cos(i * Math.PI / 12), c.cy + c.r * Math.sin(i * Math.PI / 12)]);
+  const paints = [{ pid: 0, kind: 's', subs: [{ pts: circ, curves: 0, closed: true }, { pts: [[94, 200], [106, 200]], curves: 0 }, { pts: [[100, 194], [100, 206]], curves: 0 }] }];
+  // 기호 둘레는 칸처럼 막혀 있고(88~112 × 190~210) 글자도 칸 안이지만(84~118 × 160~190) 두 칸이 변을 함께 쓰지 않음
+  const segs = [[88, 188, 88, 212], [112, 188, 112, 212], [88, 210, 112, 210], [84, 150, 84, 190], [118, 150, 118, 190], [84, 160, 118, 160], [84, 190, 118, 190], [94, 200, 106, 200], [100, 194, 100, 206]].map(([x1, y1, x2, y2]) => ({ x1, y1, x2, y2 }));
+  const items = [{ id: 'i1', page: 1, str: '146', x: 104, y: 192, w: 20, h: 12, a: -Math.PI / 2, box: L.box(94, 172, 107, 192) }];
+  const r = L.strokeSymbols(paints, segs, items, 8.6);
+  assert.ok(!r.items.some(i => i.src === 'symbol'), JSON.stringify(r.items.map(i => i.str)));
+});
+test('용접 기준선은 화살표 · 꼬리가 비스듬히 붙은 선만(숨은선이 붙은 외형선 아님) · J 기호(세로선 + 호)는 형상 · 꺾은선 원 안 품번은 후보 아님', () => {
+  const pg = pagesE[0];
+  assert.equal(pg.refs.length, 3, '기준선 ' + pg.refs.length);
+  const c = F.pageCandidates(pg, L.cleanSettings({ std: 'weld' }), {}, { balloons: [] }).cands.filter(x => L.stdOf(x) === 'weld');
+  assert.equal(c.filter(x => x.kind === '용접 형상').length, 1, JSON.stringify(c.map(x => x.raw)));
+  assert.deepEqual(c.filter(x => x.kind === '각장').map(x => x.spec), ['z6 z8']);
+  const all = L.detectCandidates(pg, L.cleanSettings(), {});
+  assert.ok(!all.cands.some(x => x.raw === '5'), '품번 5 가 후보');
+  assert.ok(all.excluded.some(x => x.raw === '5' && /원 안/.test(x.reason)));
+});
+test('「⊥」 를 두 토막씩 그은 선 글꼴 기호도 하나로 · 짧은 색 지시선(가운데서 나뉜 첫 토막)도 지시선', () => {
+  // 틀: 칸1(기호) 100~117 · 칸2(글자) 117~150, 높이 17
+  const segs = [[100, 300, 150, 300], [100, 317, 150, 317], [100, 300, 100, 317], [117, 300, 117, 317], [150, 300, 150, 317]].map(([x1, y1, x2, y2]) => ({ x1, y1, x2, y2 }));
+  const paints = [{ pid: 0, kind: 's', subs: [{ pts: [[103, 314.5], [108.5, 314.5], [114, 314.5]], curves: 0 }, { pts: [[108.5, 314.5], [108.5, 308.5], [108.5, 302.5]], curves: 0 }] }];
+  const items = [{ id: 'i1', page: 1, str: '0,1', x: 121, y: 312.9, w: 16, h: 11.8, a: 0, box: L.box(121, 303.5, 137, 315.5) }];
+  const r = L.strokeSymbols(paints, segs, items, 8.5);
+  assert.ok(r.items.some(i => i.str === '⊥'), JSON.stringify(r.items.map(i => i.str)));
+  const lt = L.leaderTarget({ cx: 100, cy: 100, r: 21.6 }, [{ x1: 120.6, y1: 100, x2: 122.7, y2: 100, color: '255,0,0' }, { x1: 122.7, y1: 100, x2: 124.8, y2: 100, color: '255,0,0' }]);
+  assert.ok(lt && lt.x > 122, JSON.stringify(lt));
+  // ◎ 를 꺾은선 원 둘(곡선 없음)로 그린 것
+  const ring = (cx, cy, r) => { const p = []; for (let i = 0; i <= 32; i++) p.push([cx + r * Math.cos(i * Math.PI / 16), cy + r * Math.sin(i * Math.PI / 16)]); return { pts: p, curves: 0, closed: false }; };
+  const r2 = L.strokeSymbols([{ pid: 0, kind: 's', subs: [ring(108.5, 308.5, 5), ring(108.5, 308.5, 2.8)] }], segs, [{ id: 'i2', page: 1, str: '0,1', x: 121, y: 312.9, w: 16, h: 11.8, a: 0, box: L.box(121, 303.5, 137, 315.5) }], 8.5);
+  assert.ok(r2.items.some(i => i.str === '◎'), JSON.stringify(r2.items.map(i => i.str)));
+});
+test('용접 기준선 옆 숫자: 기준선과 같은 방향 · 기준선 위쪽 구간의 숫자만 용접 크기(세로 치수 · 기준선 왼쪽 치수는 그대로)', () => {
+  const tok = (id, str, x, y, a) => ({ id, str, cx: x, cy: y, h: 12, a, box: a ? L.box(x - 6, y - 8, x + 6, y + 8) : L.box(x - 8, y - 6, x + 8, y + 6) });
+  const ref = { x1: 300, y1: 400, x2: 400, y2: 400, a: 0, L: 100, u0: 300, u1: 400, v: 400, dash: 1, tip: true, syms: [{ side: -1, u0: 360, u1: 372, ext: 11, box: L.box(360, 389, 372, 400) }] };
+  const pg = { page: 1, w: 1200, h: 800, tokens: [tok('a', '6', 330, 393, 0), tok('b', '43.5', 340, 392, -Math.PI / 2), tok('c', '41', 270, 393, 0)], circles: [{ cx: 1, cy: 1, r: 3 }], refs: [ref] };
+  const c = L.detectCandidates(pg, L.cleanSettings(), {}).cands;
+  assert.deepEqual(c.map(x => [x.raw, x.kind]).sort(), [['41', '길이'], ['43.5', '길이'], ['6', '용접 크기']]);
+});
+test('용접 기호: 떨어진 두 세로선(플러그 · 슬롯)도 기호 하나', () => {
+  const segs = [{ x1: 100, y1: 300, x2: 200, y2: 300 }, { x1: 100, y1: 300, x2: 86, y2: 314 }]; // 기준선 + 비스듬한 화살표 선
+  for (let x = 103; x < 196; x += 6) segs.push({ x1: x, y1: 302.3, x2: x + 3, y2: 302.3 }); // 점선
+  segs.push({ x1: 148, y1: 300, x2: 148, y2: 283 }, { x1: 156, y1: 300, x2: 156, y2: 283 }); // 8pt 떨어진 두 세로선(위 막대 없음)
+  const refs = L.findWeldRefs(segs);
+  assert.equal(refs.length, 1); assert.equal(refs[0].syms.length, 1);
+  assert.ok(Math.abs(refs[0].syms[0].u1 - refs[0].syms[0].u0 - 8) < 0.5, JSON.stringify(refs[0].syms));
+});
+test('풍선 연결: 가까운 짝을 먼저(옆 풍선이 먼 글자를 두고 가까운 짝을 빼앗지 않음)', () => {
+  // 1번 풍선의 지시선은 a 바로 옆에서 끝나고, 2번 풍선의 지시선은 a · b 사이에서 끝나 치수선을 타고 내려감
+  const cands = [{ id: 'a', box: L.box(130, 128, 144, 150) }, { id: 'b', box: L.box(158, 123, 172, 146) }];
+  const balloons = [{ no: 1, page: 1, cx: 105, cy: 138, r: 20 }, { no: 2, page: 1, cx: 118, cy: 93, r: 20 }];
+  const segs = [{ x1: 125, y1: 138.4, x2: 128.7, y2: 138.6, color: '255,0,0' }, { x1: 132.6, y1: 104.7, x2: 145.3, y2: 113.6, color: '255,0,0' }, { x1: 145.3, y1: 113.6, x2: 145.2, y2: 165, color: '0,0,0' }];
+  const lk = L.linkBalloons(balloons, cands, { page: 1, segs }, L.cleanSettings());
+  assert.deepEqual(lk.map(x => [x.no, x.candId]), [[1, 'a'], [2, 'b']]);
+});
+test('도면 E 전체: 수강생 기준서 양식 정답으로 목표 1 · 목표 2(치수 · 용접 풍선 PDF 따로) 완전 일치율', async () => {
+  const runs = [[pagesE, 'dim', 'value'], [pagesEb, 'dim', 'number'], [pagesE, 'weld', 'value'], [pagesEw, 'weld', 'number']];
+  for (const [pages, std, mode] of runs) {
+    const s = L.cleanSettings({ std });
+    const items = mode === 'number' ? F.goal2(pages, s, {}) : F.goal1(pages, s, {});
+    const sc = L.scoreResults(items.map(L.toPred), truthE.filter(t => t.std === std), mode);
+    assert.equal(sc.fullRate, 1, std + ' ' + mode + ' ' + JSON.stringify(sc.wrong.concat(sc.misses)));
+    assert.equal(sc.precision, 1, std + ' ' + mode + ' 더 찾음 ' + JSON.stringify(sc.extra));
+  }
+});
+
+section('예시 도면 5종 — 전체 흐름(pdf.js)');
 test('정답 엑셀과 js 안 정답이 같음', () => {
   for (const d of Sample.drawings) {
+    if (Sample.truthSheets && Sample.truthSheets[d.key]) { // 도면 E: 기준서 양식 — 엑셀 두 시트 = js 의 시트별 정답
+      const x = M.readTruth(path.join(root, 'samples', d.name + '_정답.xlsx')), j = M.sampleSheetTruth(d.key);
+      assert.equal(x.length, j.length); assert.equal(x.length, 11);
+      x.forEach((t, i) => { assert.equal(t.no, j[i].no); assert.equal(t.std, j[i].std); assert.deepEqual(L.sameSheetFields(t.sheet, j[i].sheet), [true, true, true], d.name + ' ' + t.no); });
+      continue;
+    }
     const fromXlsx = M.readTruth(path.join(root, 'samples', d.name + '_정답.xlsx'));
     assert.equal(fromXlsx.length, Sample.truth[d.key].length);
     fromXlsx.forEach((t, i) => { assert.equal(t.no, Sample.truth[d.key][i].no); assert.equal(L.sameValue(t, Sample.truth[d.key][i]), true, d.name + ' ' + t.no); });
@@ -408,6 +584,7 @@ test('정답 엑셀과 js 안 정답이 같음', () => {
 test('목표 1(풍선 없음)·목표 2(풍선 있음) 일치율 — 예시에서 85% 이상, 선으로 그린 「8」 은 못 읽는 것이 정상', async () => {
   const got = {};
   for (const d of Sample.drawings) {
+    if (Sample.truthSheets && Sample.truthSheets[d.key]) continue; // 도면 E 는 아래 3차 절에서
     for (const [suf, ball] of [['_풍선없음.pdf', false], ['_풍선있음.pdf', true]]) {
       const r = await M.measure(lib, path.join(root, 'samples', d.name + suf), Sample.truth[d.key], ball);
       got[d.key + (ball ? '2' : '1')] = r.score;

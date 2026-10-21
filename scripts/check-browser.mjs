@@ -1,7 +1,8 @@
 // 헤드리스 브라우저로 주요 흐름 점검 (선택 — playwright-core 가 있는 PC 에서만)
 //   PLAYWRIGHT_CORE=/경로/node_modules/playwright-core node scripts/check-browser.mjs
 // file:// 로 index.html 을 열어 예시 도면 A(풍선 없음) → 후보 확인 · 글자 눌러 추가 · 제외 영역 그리기·지우기 → 목표 1 풍선 배치 · 끌어 옮기기
-// → 풍선 PDF · 엑셀 내려받아 다시 읽기 → 일치율(예시 정답) · 기록 → 예시 도면 B·C(풍선 있음) 목표 2 → 도면 D(윤곽선 · 기준서 구분) → 설정 순서로 누르고,
+// → 풍선 PDF · 엑셀 내려받아 다시 읽기 → 일치율(예시 정답) · 기록 → 예시 도면 B·C(풍선 있음) 목표 2 → 도면 D(윤곽선 · 기준서 구분)
+// → 도면 E(선 글꼴 · 기준서 양식 엑셀 · 2x · 일반공차) → 설정 순서로 누르고,
 // JS 오류와 폭별 가로 넘침을 잽니다. BREAK=1 이면 일부러 넓은 상자를 넣어 넘침 점검기가 잡는지 봅니다.
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -94,9 +95,11 @@ const sc = L.scoreResults(g2.map(L.toPred), require(path.join(root, 'js/sample-p
 ok(back.length === 1 && g2.length === 14 && sc.valueRate === 1, '내려받은 풍선 PDF 다시 읽기: 풍선 ' + g2.length + '개 · 값 일치 ' + sc.valueRate + ' · ' + Math.round(pdf.bytes.length / 1024) + 'KB');
 const x1 = await dl(() => clickText('button', '엑셀 내려받기'));
 const wb = XLSX.read(x1.bytes, { type: 'buffer' });
-ok(wb.SheetNames.join(',') === '치수 기준서,용접 기준서,도면 정보,제외된 글자', '엑셀 시트 4개(치수 · 용접 기준서 나눔)');
-const rows = XLSX.utils.sheet_to_json(wb.Sheets['치수 기준서'], { header: 1 });
-ok(rows.length === 15 && rows[0][0] === '번호' && rows.slice(1).every(r => r[3]) && rows[1][22] === '치수', '치수 기준서 14행 + 머리 · 기준서 칸');
+ok(wb.SheetNames.join(',') === '치수 기준서,치수 기준서 상세,용접 기준서,용접 기준서 상세,도면 정보,제외된 글자', '엑셀 시트 6개(치수 · 용접 기준서 + 상세)');
+const rows = XLSX.utils.sheet_to_json(wb.Sheets['치수 기준서 상세'], { header: 1 });
+ok(rows.length === 15 && rows[0][0] === '번호' && rows.slice(1).every(r => r[3]) && rows[1][22] === '치수', '치수 기준서 상세 14행 + 머리 · 기준서 칸');
+const rowsS = XLSX.utils.sheet_to_json(wb.Sheets['치수 기준서'], { header: 1 });
+ok(rowsS.length === 15 && rowsS[0].slice(0, 7).join('|') === L.SHEET_HEAD.join('|') && rowsS.slice(1).every(r => r[1]), '치수 기준서 = 수강생 기준서 칸(No. · Inspection Item · Standard · MAX · MIN · 기구 · 개수)');
 const png = await dl(() => clickText('button', '이 쪽 PNG'));
 ok(png.bytes.slice(1, 4).toString() === 'PNG', 'PNG 내려받기');
 
@@ -131,7 +134,7 @@ await page.waitForTimeout(800);
 ok(await page.locator('main table.list img.thumb').count() >= 1, '용접 형상 그림 미리보기');
 await shot('04_extract_B');
 const x2 = await dl(() => clickText('button', '엑셀 내려받기'));
-const r2 = XLSX.utils.sheet_to_json(XLSX.read(x2.bytes, { type: 'buffer' }).Sheets['용접 기준서'], { header: 1 });
+const r2 = XLSX.utils.sheet_to_json(XLSX.read(x2.bytes, { type: 'buffer' }).Sheets['용접 기준서 상세'], { header: 1 });
 const shapeRow = r2.find(r => r[4] === '용접 형상');
 ok(shapeRow && /\d/.test(shapeRow[21] || ''), '엑셀에 용접 형상 잘라낼 영역 좌표');
 await go('#/accuracy'); await clickText('button', '예시 정답 불러오기');
@@ -166,8 +169,37 @@ await go('#/accuracy'); await clickText('button', '예시 정답 불러오기');
 const dacc = await page.textContent('main');
 ok(dacc.includes('완전 일치율') && dacc.includes('필드 일치율 · 항목명'), '수강생 방식 일치율(필드 · 완전) 표시');
 
+// 3차: 도면 E — 한 줄 선 글꼴 · 자간 넓힌 글 · 일반공차 · 2x, 정답은 수강생 기준서 양식(치수 · 각장 시트)
+await go('#/home');
+await page.locator('.sample-card', { hasText: '예시 도면 E' }).locator('button', { hasText: '풍선 없음' }).click();
+await page.waitForFunction(() => location.hash === '#/drawing' && document.querySelector('main').textContent.includes('검사 대상 후보'), null, { timeout: 30000 });
+await go('#/balloon'); await waitCanvas();
+await clickText('button', '전체');
+const xe = await dl(() => clickText('button', '엑셀 내려받기'));
+const wbe = XLSX.read(xe.bytes, { type: 'buffer' });
+const re = XLSX.utils.sheet_to_json(wbe.Sheets['치수 기준서'], { header: 1, defval: '' });
+const tapRow = re.find(r => r[1] === 'TAP'), holeRow = re.find(r => r[1] === 'Hole' && r[2] === '11');
+ok(tapRow && tapRow[2] === 'M20x2.5' && tapRow[6] === 2 && tapRow[7] === '' && tapRow[8] === '' && (tapRow.length <= 9 || re[0][9] !== '측정값 3' || tapRow[9] === '-'), '「2x M20」 → TAP M20x2.5 · 개수 2 · 측정값 칸 2개');
+ok(holeRow && holeRow[3] === 0.018 && holeRow[4] === 0, 'Ø11 H7 → Hole 11 · MAX 0.018 · MIN 0');
+ok(re.some(r => r[1] === 'Dimension' && r[2] === '262' && r[3] === 2 && r[4] === -2), '자간 넓힌 「2 6 2」 + 일반공차 ISO 13920-BF → 262 ±2');
+ok(re.some(r => r[1] === 'Dimension' && r[2] === '146'), '파란 선 글꼴 「146」');
+const we = XLSX.utils.sheet_to_json(wbe.Sheets['용접 기준서'], { header: 1, defval: '' });
+ok(we.some(r => r[1] === 'Weld' && /^a4\n\(06x06\)$/.test(r[2])) && we.some(r => r[1] === 'Weld' && r[2] === '' && r[5] === 'Visual'), '용접 기준서: 선 글꼴 a4 → a4 (06x06) · 형상 = Weld / Visual');
+ok(XLSX.utils.sheet_to_json(wbe.Sheets['도면 정보'], { header: 1 }).some(r => r[0] === '일반공차' && /13920-B/.test(r[1])), '도면 정보에 찾은 일반공차');
+await go('#/accuracy'); await clickText('button', '예시 정답 불러오기');
+let eacc = await page.textContent('main');
+ok(eacc.includes('완전 일치율') && eacc.includes('100.0%'), '도면 E 목표 1(전체) 기준서 양식 정답 대조');
+await go('#/home');
+await page.locator('.sample-card', { hasText: '예시 도면 E' }).locator('button', { hasText: '용접 풍선' }).click();
+await page.waitForFunction(() => location.hash === '#/extract' && document.querySelectorAll('svg.ov g.bl').length > 0, null, { timeout: 30000 });
+ok(await page.locator('svg.ov g.bl').count() === 4 && await page.locator('svg.ov g.bl.miss').count() === 0, '도면 E 용접 풍선 4개 모두 연결(기준서 = 용접)');
+await go('#/accuracy'); await clickText('button', '예시 정답 불러오기');
+eacc = await page.textContent('main');
+ok(/완전 일치율\s*100\.0%/.test(eacc.replace(/\s+/g, ' ')) || eacc.includes('100.0%'), '도면 E 목표 2(용접) 100%');
+
 await go('#/settings');
 ok((await page.textContent('main')).includes('AI 연결 설정'), '설정 화면 · AI 연결 설정');
+ok((await page.textContent('main')).includes('일반공차'), '설정 화면 · 일반공차');
 
 // 폭별 가로 넘침 — 안쪽 가로 스크롤 상자(overflow auto) 안은 의도된 것이라 뺍니다
 await go('#/home');

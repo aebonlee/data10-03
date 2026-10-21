@@ -16,10 +16,14 @@
         // 글자를 윤곽선으로 바꾼 PDF: 칠한 경로를 글자로 되읽고(4-1), 선으로 그린 Ø · 기하공차 기호를 붙입니다(4-2)
         var ot = L.readOutlineText(paths.paints, n);
         var segs = paths.segs.filter(function (s) { return !ot.used[s.pid]; });
-        var sym = L.strokeSymbols(paths.paints, segs, ot.items, ot.pageCap);
-        var all = items.concat(sym.items), circles = L.findCircles(paths.subpaths);
-        return { page: n, w: vp.width, h: vp.height, items: all, textItems: items.length, outlineItems: ot.items.length, tokens: L.groupTokens(all, n, circles), segs: segs,
-          circles: circles, tris: L.findWeldTriangles(paths.subpaths.filter(function (sp) { return !ot.used[sp.pid]; })), refs: L.findWeldRefs(segs) };
+        // 글자 층이 있는 도면에서도 Ø · ° · 기하공차 기호를 선으로 그은 경우가 있어(3차) 글자 층 글자에도 붙임
+        var cap = ot.pageCap || L.textCap(items);
+        var sym = L.strokeSymbols(paths.paints, segs, items.concat(ot.items), cap);
+        // 한 줄 선 글꼴(4-3): 글자 층 글 앞뒤의 선 글자(「M」 「Φ」)와 선 글자만으로 된 줄
+        var st = L.readStrokeText(paths.paints, sym.items, cap, n);
+        var all = st.items, circles = L.findCircles(paths.subpaths);
+        return { page: n, w: vp.width, h: vp.height, items: all, textItems: items.length, outlineItems: ot.items.length, strokeItems: st.added, strokeAttached: st.attached, tokens: L.groupTokens(all, n, circles.concat(L.findCircles(paths.subpaths.filter(function (sp) { return !sp.curves; }), true))), segs: segs,
+          circles: circles, tris: L.findWeldTriangles(paths.subpaths.filter(function (sp) { return !ot.used[sp.pid]; })), refs: L.findWeldRefs(segs, paths.subpaths.filter(function (sp) { return sp.curves && !ot.used[sp.pid]; })) };
       });
     });
   }
@@ -77,7 +81,8 @@
       placed.forEach(function (b, i) { mine[i].balloon = b; if (b.overlap) mine[i].note = '풍선이 다른 글자와 겹침 — 옮겨 주세요'; });
     });
     items.sort(function (a, b) { return a.no - b.no; });
-    items.forEach(function (x) { x.method = '자동 배치'; delete x.pg; });
+    var gen = L.genTolFor(pages, s);
+    items.forEach(function (x) { x.method = '자동 배치'; x.gen = gen; delete x.pg; });
     return items;
   }
 
@@ -107,6 +112,8 @@
     });
     var seen = {};
     out.forEach(function (x) { if (seen[x.no]) { x.check = true; x.note = (x.note ? x.note + ' · ' : '') + '같은 번호 풍선이 또 있음'; } seen[x.no] = 1; });
+    var gen = L.genTolFor(pages, s);
+    out.forEach(function (x) { x.gen = gen; });
     out.sort(function (a, b) { return a.no - b.no || a.page - b.page; });
     return out;
   }

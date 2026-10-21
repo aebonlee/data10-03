@@ -1,6 +1,7 @@
 // 일치율 측정(명령줄) — 브라우저 화면 「일치율 측정」과 같은 로직을 node 에서 돌립니다.
-//   예시 도면 3종 전부:   node scripts/measure-samples.mjs
-//   내 도면 하나:         node scripts/measure-samples.mjs 도면.pdf 정답.xlsx [--balloon]   (--balloon = 이미 풍선이 있는 도면 → 목표 2)
+//   예시 도면 전부:       node scripts/measure-samples.mjs
+//   내 도면 하나:         node scripts/measure-samples.mjs 도면.pdf 정답.xlsx [--balloon] [--std=dim|weld]   (--balloon = 이미 풍선이 있는 도면 → 목표 2,
+//                         정답이 수강생 기준서 양식이면 --std 로 치수 · 용접 시트를 고름)
 //   자세히(놓친 것 목록):  ... --detail
 // pdf.js 는 vendor/pdfjs 의 것을 씁니다(설치 불필요).
 import { createRequire } from 'node:module';
@@ -25,8 +26,12 @@ export async function readPages(lib, bytes) {
   const pdf = await lib.getDocument({ data: new Uint8Array(bytes), isEvalSupported: false, disableFontFace: true, verbosity: 0 }).promise;
   return F.extractAll(pdf, lib.OPS);
 }
-export function readTruth(file) {
+export function readTruth(file, std) {
   const wb = XLSX.read(fs.readFileSync(file), { type: 'buffer' });
+  // 수강생 기준서 양식(No. · Inspection Item · Standard · Tolerance)이면 시트마다 읽어 합침 — std(dim · weld)를 주면 그 기준서만
+  let sheet = [];
+  wb.SheetNames.forEach(n => { const st = L.parseSheetTruth(XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '' }), n); if (st) sheet = sheet.concat(st); });
+  if (sheet.length) return std ? sheet.filter(t => t.std === std) : sheet;
   const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '' });
   return L.parseTruth(aoa).items;
 }
@@ -35,7 +40,12 @@ export async function measure(lib, pdfFile, truthItems, ballooned, settings) {
   const pages = await readPages(lib, fs.readFileSync(pdfFile));
   const items = ballooned ? F.goal2(pages, s, {}) : F.goal1(pages, s, {});
   const score = L.scoreResults(items.map(L.toPred), truthItems, ballooned ? 'number' : 'value');
+  if (score.sheetMode) console.log('  기준서 양식 — 필드 일치율 항목명 ' + pct(score.fieldRate.name) + ' · 기준값 ' + pct(score.fieldRate.base) + ' · 공차 ' + pct(score.fieldRate.tol) + ' · 완전 일치율 ' + pct(score.fullRate));
   return { items, score, pages };
+}
+export function sampleSheetTruth(key) {
+  const Sample = require(path.join(root, 'js/sample-pdfs.js')), sh = (Sample.truthSheets || {})[key] || {};
+  return Object.keys(sh).flatMap(n => L.parseSheetTruth(sh[n], n) || []);
 }
 function pct(x) { return (x * 100).toFixed(1) + '%'; }
 function line(name, sc) {
@@ -53,16 +63,20 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const lib = await loadPdfjs();
   const files = args.filter(a => !a.startsWith('--'));
   if (files.length >= 2) {
-    const r = await measure(lib, files[0], readTruth(files[1]), args.includes('--balloon'));
+    const std = (args.find(a => a.startsWith('--std=')) || '').slice(6) || undefined; // --std=dim | --std=weld (기준서 양식 정답의 시트 고르기)
+    const r = await measure(lib, files[0], readTruth(files[1], std), args.includes('--balloon'), std ? { std } : undefined);
     console.log(line(path.basename(files[0]), r.score)); if (det) detail(r.score);
   } else {
     const Sample = require(path.join(root, 'js/sample-pdfs.js'));
     let sumT = 0, sumE = 0, sumTP = 0, sumP = 0;
     for (const d of Sample.drawings) {
-      for (const [suffix, ball] of [['_풍선없음.pdf', false], ['_풍선있음.pdf', true]]) {
+      const sheet = Sample.truthSheets && Sample.truthSheets[d.key]; // 도면 E: 수강생 기준서 양식 — 치수 · 용접 기준서를 따로 잼
+      const runs = sheet ? [['_풍선없음.pdf', false, 'dim'], ['_풍선있음.pdf', true, 'dim'], ['_풍선없음.pdf', false, 'weld'], ['_풍선있음_용접.pdf', true, 'weld']] : [['_풍선없음.pdf', false], ['_풍선있음.pdf', true]];
+      for (const [suffix, ball, std] of runs) {
         const f = path.join(root, 'samples', d.name + suffix);
-        const r = await measure(lib, f, Sample.truth[d.key], ball);
-        console.log((ball ? '목표2 ' : '목표1 ') + line(d.name + suffix.replace('.pdf', ''), r.score));
+        const truth = sheet ? sampleSheetTruth(d.key).filter(t => t.std === std) : Sample.truth[d.key];
+        const r = await measure(lib, f, truth, ball, std ? { std } : undefined);
+        console.log((ball ? '목표2 ' : '목표1 ') + line(d.name + suffix.replace('.pdf', '') + (std ? '(' + (std === 'dim' ? '치수' : '용접') + ')' : ''), r.score));
         if (det) detail(r.score);
         sumT += r.score.nTruth; sumE += r.score.exact; sumTP += r.score.tp; sumP += r.score.nPred;
       }
