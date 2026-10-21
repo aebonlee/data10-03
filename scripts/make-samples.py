@@ -9,6 +9,10 @@
   세로로 돌아간 치수, 기하공차 틀의 칸 글자, 용접 기호(삼각형) 옆 숫자, 글자 없이 형상만 있는 용접 기호,
   그리고 도면 C 에는 글자가 아니라 선으로 그려진 치수 「8」 하나(1단계로는 못 읽는 것이 정상 — 2단계 OCR 대상).
 - 정답 엑셀은 사람이 풍선을 단 순서(보기별로 묶음)로 번호를 매겼습니다. 도구의 자동 번호 순서와 일부러 다릅니다.
+- 도면 D(2차, 2026-10-21)는 실제 도면에서 드러난 형태를 흉내 낸 가상 도면입니다: 글자 층이 없고 글자가 모두 칠한 윤곽선,
+  지름 Ø · × · ° · 기하공차 기호(⌖ ▱ ∥ ⊥)는 선으로 그림, 같은 크기로 위아래 쌓인 공차, 따로 떨어진 「±1」 · 「6x」+「M12」,
+  비스듬한 글, ISO 용접 기호(기준선 + 점선 · 선으로 그린 삼각형 · a 크기 · 개수x길이 · 기준선 아래 부기 · 양면 · 크기 없는 개선 기호),
+  도면에 원래 그려진 품번 풍선(윤곽선 숫자 — 검사 풍선 아님), 검사 풍선은 색 원 + 글자 층 번호 + 빨간 지시선(가운데서 두 토막).
 
 출력: samples/*.pdf · samples/*_정답.xlsx · js/sample-pdfs.js(브라우저에서 바로 여는 base64 사본)
 """
@@ -232,6 +236,146 @@ class Sheet:
     def save(self):
         self.c.showPage()
         self.c.save()
+
+
+class OutlineSheet(Sheet):
+    """글자를 칠한 윤곽선으로 그리는 도면(글자 층 없음) — CAD 가 「글자를 윤곽선으로」 내보낸 PDF 를 흉내냅니다.
+    윤곽은 DejaVu Sans(도구의 참조 글꼴 Liberation Sans 와 다른 글꼴)에서 꺼냅니다. 글 한 줄 = 칠하기 한 번."""
+
+    def __init__(self, path, w_mm, h_mm):
+        super().__init__(path, w_mm, h_mm)
+        from fontTools.ttLib import TTFont as FTFont
+        self.ft = FTFont(find_font())
+        self.gs = self.ft.getGlyphSet()
+        self.cmap = self.ft.getBestCmap()
+        self.upm = self.ft['head'].unitsPerEm
+        self.hmtx = self.ft['hmtx']
+
+    def _glyph_path(self, path, ch, ox, k):
+        from fontTools.pens.basePen import BasePen
+        gn = self.cmap.get(ord(ch))
+        if not gn:
+            return 0
+        class P(BasePen):
+            def _moveTo(s2, pt): path.moveTo(ox + pt[0] * k, pt[1] * k)
+            def _lineTo(s2, pt): path.lineTo(ox + pt[0] * k, pt[1] * k)
+            def _curveToOne(s2, a, b, c): path.curveTo(ox + a[0] * k, a[1] * k, ox + b[0] * k, b[1] * k, ox + c[0] * k, c[1] * k)
+            def _closePath(s2): path.close()
+        self.gs[gn].draw(P(self.gs))
+        return self.hmtx[gn][0] * k
+
+    def width(self, s, size):
+        k = size / self.upm
+        return sum(self.hmtx[self.cmap[ord(ch)]][0] * k for ch in s if ord(ch) in self.cmap) / MM
+
+    def text(self, x, y, s, size=12, rot=0, anchor='start', color=black, tracking=0.0):
+        c = self.c
+        c.saveState()
+        c.setFillColor(color)
+        X, Y = self.P(x, y)
+        c.translate(X, Y)
+        if rot:
+            c.rotate(rot)
+        k = size / self.upm
+        wpt = self.width(s, size) * MM + tracking * MM * max(0, len(s) - 1)
+        ox = -wpt / 2 if anchor == 'middle' else (-wpt if anchor == 'end' else 0)
+        p = c.beginPath()
+        for ch in s:
+            if ch != ' ':
+                self._glyph_path(p, ch, ox, k)
+            ox += self.hmtx[self.cmap[ord(ch)]][0] * k + tracking * MM
+        c.drawPath(p, stroke=0, fill=1)
+        c.restoreState()
+        return wpt / MM
+
+    def real_text(self, x, y, s, size, color):
+        """글자 층 글자(풍선 번호용 — 풍선 도구가 단 번호처럼)"""
+        Sheet.text(self, x, y, s, size, anchor='middle', color=color)
+
+    # 선으로 그린 기호들(글자 높이 hh mm 기준)
+    def sym_dia(self, x, y, hh):
+        """지름 Ø: 원 + 가운데를 지나는 비스듬한 선. (x, y) = 기준선 왼쪽"""
+        r = hh * 0.36
+        cx, cy = x + r, y - hh / 2
+        self.circle(cx, cy, r, 0.18)
+        self.line(cx - r * 0.25, cy + r * 1.35, cx + r * 0.25, cy - r * 1.35, 0.18)
+        return 2 * r + hh * 0.25
+
+    def sym_times(self, cx, cy, hh):
+        d = hh * 0.28
+        self.line(cx - d, cy - d, cx + d, cy + d, 0.18)
+        self.line(cx - d, cy + d, cx + d, cy - d, 0.18)
+
+    def sym_deg(self, cx, cy, hh):
+        r = hh * 0.14
+        self.poly([(cx + r * math.cos(t * math.pi / 4), cy + r * math.sin(t * math.pi / 4)) for t in range(9)], close=False, lw=0.15)
+
+    def gdt_frame(self, x, y, sym, cells, hh=3.0):
+        """기하공차 틀: 첫 칸은 선으로 그린 기호, 나머지 칸은 윤곽선 글자. (x, y) = 틀 왼쪽 아래"""
+        H = hh * 2.0
+        self.rect(x, y - H, H, H, 0.18)
+        cx, cy, d = x + H / 2, y - H / 2, hh * 0.45
+        if sym == 'pos':
+            self.circle(cx, cy, d * 0.75, 0.18); self.line(cx - d * 1.4, cy, cx + d * 1.4, cy, 0.18); self.line(cx, cy - d * 1.4, cx, cy + d * 1.4, 0.18)
+        elif sym == 'flat':
+            self.poly([(cx - d * 1.1, cy + d * 0.7), (cx + d * 0.5, cy + d * 0.7), (cx + d * 1.1, cy - d * 0.7), (cx - d * 0.5, cy - d * 0.7), (cx - d * 1.1, cy + d * 0.7)], close=False, lw=0.18)
+        elif sym == 'par':
+            for off in (-0.35, 0.35):
+                self.line(cx + d * off - d * 0.35, cy + d * 1.1, cx + d * off + d * 0.35, cy - d * 1.1, 0.18)
+        elif sym == 'perp':
+            self.line(cx, cy - d * 1.2, cx, cy + d * 1.1, 0.18); self.line(cx - d * 1.1, cy + d * 1.1, cx + d * 1.1, cy + d * 1.1, 0.18)
+        xx = x + H
+        for cell in cells:
+            dia = cell.startswith('Ø')
+            body = cell[1:] if dia else cell
+            fs = hh / 0.729 * MM
+            w = max(H, self.width(body, fs) + (hh if dia else 0) + 2.5)
+            self.rect(xx, y - H, w, H, 0.18)
+            tx = xx + 1.2
+            if dia:
+                tx += self.sym_dia(tx, y - H / 2 + hh / 2, hh)
+            self.text(tx, y - H / 2 + hh / 2, body, fs)
+            xx += w
+        return xx
+
+    def weld_ref(self, jx, jy, rx, ry, L, syms, size=11):
+        """ISO 2553 용접 기호: 화살표(jx,jy) → 기준선 시작(rx,ry), 기준선(실선) + 0.8mm 아래 점선, 끝에 꼬리.
+        syms = [(side, kind, u)] side = -1 위(실선 쪽) / +1 아래, kind = fillet | bevel, u = 기준선 시작에서 기호까지(mm)"""
+        self.line(jx, jy, rx, ry, 0.2)
+        self.arrow(jx, jy, jx - rx, jy - ry)
+        self.line(rx, ry, rx + L, ry, 0.2)
+        x = rx + 0.6
+        while x < rx + L - 1.2:
+            self.line(x, ry + 0.8, x + 1.0, ry + 0.8, 0.13)
+            x += 1.8
+        self.line(rx + L, ry, rx + L + 3, ry - 3, 0.2)
+        self.line(rx + L, ry, rx + L + 3, ry + 3, 0.2)
+        for side, kind, u in syms:
+            t = rx + u
+            base = ry + (0.8 if side > 0 else 0)
+            if kind == 'fillet':
+                self.poly([(t, base), (t, base + 4.0 * side), (t + 4.0, base)], close=False, lw=0.2)
+            else:
+                self.line(t, base, t, base + 4.0 * side, 0.2)
+                self.line(t, base, t + 3.6, base + 4.0 * side, 0.2)
+
+    def ix_balloon(self, x, y, no, target, r=5.0):
+        """풍선 도구(IX 류)가 단 검사 풍선: 분홍 원 + 파란 테두리 + 글자 층 번호 + 빨간 지시선(가운데서 두 토막)"""
+        c = self.c
+        c.saveState()
+        dx, dy = target[0] - x, target[1] - y
+        n = math.hypot(dx, dy)
+        sx, sy = x + dx / n * r, y + dy / n * r
+        mx, my = (sx + target[0]) / 2, (sy + target[1]) / 2
+        c.setStrokeColor(Color(1, 0, 0))
+        self.line(mx, my, sx, sy, 0.3)
+        self.line(mx, my, *target, 0.3)
+        c.setStrokeColor(Color(31 / 255, 73 / 255, 125 / 255))
+        c.setFillColor(Color(242 / 255, 220 / 255, 219 / 255))
+        c.setLineWidth(0.35 * MM)
+        c.circle(*self.P(x, y), r * MM, stroke=1, fill=1)
+        c.restoreState()
+        self.real_text(x, y + 1.8, str(no), 13, black)
 
 
 # ── 도면 정의 ─────────────────────────────────────────────────
@@ -487,10 +631,117 @@ def drawing_c(s):
     ]
 
 
+def drawing_d(s):
+    """A3 용접 프레임 FRM-400 — 글자 층 없는 윤곽선 도면(2차: 실제 도면에서 틀린 유형을 흉내)"""
+    HH = 12 * 0.729 / MM  # 12pt 글자의 대문자 높이(mm)
+    # 형상: 바닥판 · 세움판 · 구멍
+    s.rect(60, 150, 220, 20, 0.35)
+    s.rect(150, 60, 20, 90, 0.35)
+    s.circle(100, 160, 6, 0.3)
+    s.line(30, 175, 320, 175, 0.13)
+    # 1 640 ±1 (한 덩어리)
+    s.dim_h(60, 280, 186, y_from=171)
+    s.text(150, 184, '640 ±1', 12)
+    # 2 58 + 쌓인 공차 「+1」 「0」(같은 크기 · 90° 돌림)
+    s.dim_v(46, 150, 170, x_from=59)
+    s.text(44, 166, '58', 12, rot=90)
+    s.text(44 - HH - 1.2, 166 - s.width('58', 12) - 1.2, '+1', 12, rot=90)
+    s.text(44, 166 - s.width('58', 12) - 1.2, '0', 12, rot=90)
+    # 3 Ø45 +0,02 (같은 줄) 위에 +0,08 (같은 크기) — Ø 는 선으로
+    s.line(94, 156, 80, 136, 0.2)
+    s.arrow(94, 156, 0.57, 0.82)
+    s.line(80, 136, 50, 136, 0.2)
+    x = 52
+    x += s.sym_dia(x, 134.5, HH)
+    w60 = s.text(x, 134.5, '45', 12)
+    s.text(x + w60 + 2.0, 134.5, '+0,02', 12)
+    s.text(x + w60 + 2.0, 134.5 - HH - 2.0, '+0,08', 12)
+    # 4 2 × 45° — × · ° 는 선으로, 숫자는 따로
+    s.line(170, 62, 182, 50, 0.2)
+    s.line(182, 50, 205, 50, 0.2)
+    w2 = s.text(183, 48.5, '2', 12)
+    s.sym_times(183 + w2 + 2.2, 48.5 - HH / 2, HH)
+    w45 = s.text(183 + w2 + 4.4, 48.5, '45', 12)
+    s.sym_deg(183 + w2 + 4.4 + w45 + 0.9, 48.5 - HH + 0.5, HH)
+    # 5 352 와 ±1 이 따로(넓은 간격)
+    s.dim_h(170, 280, 120, y_from=148)
+    w352 = s.text(205, 118, '352', 12)
+    s.text(205 + w352 + 3.0, 118, '±1', 12)
+    # 6 6x M12 (따로)
+    s.line(105, 157, 118, 140, 0.2)
+    s.line(118, 140, 145, 140, 0.2)
+    w7 = s.text(119, 138.5, '6x', 12)
+    s.text(119 + w7 + 2.5, 138.5, 'M12', 12)
+    # 7 위치도 ⌖ Ø0.3 · 8 평면도 ▱ 1.5 CZ · 9 평행도 ∥ 0.2 B · 10 직각도 ⊥ Ø0.2 B
+    s.gdt_frame(225, 75, 'pos', ['Ø0.3'])
+    s.gdt_frame(225, 88, 'flat', ['1.5 CZ'])
+    s.gdt_frame(225, 101, 'par', ['0.2', 'B'])
+    s.gdt_frame(225, 114, 'perp', ['Ø0.2', 'B'])
+    for yy in (69, 82, 95, 108):
+        s.line(225, yy, 171, yy + 3, 0.15)
+    # 11 1240 (세로) · 12 27,5° (비스듬) · 13 1141 ±1
+    s.dim_v(300, 60, 170, x_from=281)
+    s.text(298, 125, '1240', 12, rot=90)
+    s.text(330, 140, '27,5°', 12, rot=25)
+    s.dim_h(60, 170, 40, y_from=59)
+    s.text(100, 38, '1141 ±1', 12)
+    # 용접 A: a3.5 ◺ 4x40 / 아래 부기 2줄
+    s.weld_ref(150, 100, 110, 92, 46, [(-1, 'fillet', 18)])
+    s.text(112, 90.5, 'a3.5', 12)
+    s.text(133, 90.5, '4x40', 12)
+    s.text(111, 98, 'DO NOT WELD', 10)
+    s.text(111, 102.5, '#12 AREA', 10)
+    s.line(110, 104, 138, 104, 0.15)
+    # 용접 B: 양면 a6.3 / a6.3
+    s.weld_ref(170, 128, 190, 140, 40, [(-1, 'fillet', 18), (1, 'fillet', 18)])
+    s.text(193, 138.5, 'a6.3', 12)
+    s.text(193, 146.5, 'a6.3', 12)
+    # 용접 C: 크기 없는 개선 기호(형상만)
+    s.weld_ref(170, 70, 190, 60, 34, [(-1, 'bevel', 16)])
+    # 함정: 도면에 원래 그려진 품번 풍선(윤곽선 숫자 12) · 표제란은 frame 이 그림
+    s.circle(120, 120, 4.0, 0.3)
+    s.text(120 - s.width('12', 12) / 2, 120 + HH / 2, '12', 12)
+    s.line(123, 117, 150, 110, 0.2)
+    # 함정: 빗금(짧은 평행선 여러 개 — 기하공차 ∥ 로 잡히면 안 됨)
+    for k in range(8):
+        s.line(62 + k * 3, 168, 66 + k * 3, 152, 0.13)
+    # 함정: 네모 속 「//」 옆에 칸 글자가 아닌 낱말(TYP) — 기하공차 항목 아님
+    s.rect(330, 60, 7, 7, 0.18)
+    for off in (-0.6, 0.6):
+        s.line(333.5 + off - 0.5, 61.5, 333.5 + off + 0.5, 65.5, 0.18)
+    s.text(338.5, 65.0, 'TYP', 12)
+    # 함정: 용접 기준선에 한 끝만 닿는 도면 선(기호가 아님) — 용접 A 기준선 위 · 아래
+    s.line(146, 92, 146, 99.5, 0.18)
+
+    s.frame('WELDED FRAME', 'FRM-400', '1:5', 'SS400', ['1. ALL WELDS a3 UNLESS SPECIFIED', '2. PAINT AFTER WELDING'])
+    return [
+        (1, '공차', '길이', '640 ±1', 640, 1, -1, 'mm', (140, 196), (152, 185), None),
+        (2, '공차', '길이', '58 +1/0', 58, 1, 0, 'mm', (30, 150), (40, 158), None),
+        (3, '공차', '지름', 'Ø45 +0.08/+0.02', 45, 0.08, 0.02, 'mm', (40, 122), (54, 131), None),
+        (4, '치수', '모따기', '2 x 45°', 2, None, None, 'mm', (196, 38), (190, 46), None),
+        (5, '공차', '길이', '352 ±1', 352, 1, -1, 'mm', (222, 128), (210, 120), None),
+        (6, '치수', '나사', '6x M12', 12, None, None, 'mm', (132, 128), (126, 136), None),
+        (7, '기하공차', '위치도', '⌖ Ø0.3', None, 0.3, 0, 'mm', (262, 66), (250, 70), None),
+        (8, '기하공차', '평면도', '▱ 1.5 CZ', None, 1.5, 0, 'mm', (270, 82), (258, 83), None),
+        (9, '기하공차', '평행도', '∥ 0.2 B', None, 0.2, 0, 'mm', (270, 96), (257, 96), None),
+        (10, '기하공차', '직각도', '⊥ Ø0.2 B', None, 0.2, 0, 'mm', (276, 110), (257, 109), None),
+        (11, '치수', '길이', '1240', 1240, None, None, 'mm', (312, 112), (300, 118), None),
+        (12, '치수', '각도', '27.5°', 27.5, None, None, '°', (350, 126), (336, 135), None),
+        (13, '공차', '길이', '1141 ±1', 1141, 1, -1, 'mm', (88, 28), (104, 35), None),
+        (14, '용접', '목두께', 'a3.5', 3.5, None, None, 'mm', (100, 80), (114, 87), None),
+        (15, '용접', '단속', '4x40', 40, None, None, 'mm', (150, 80), (138, 87), None),
+        (16, '주기', '용접 부기', 'DO NOT WELD #12 AREA', None, None, None, '', (96, 112), (112, 103), None),
+        (17, '용접', '목두께', 'a6.3', 6.3, None, None, 'mm', (208, 128), (198, 135), None),
+        (18, '용접', '목두께', 'a6.3', 6.3, None, None, 'mm', (182, 154), (194, 147), None),
+        (19, '용접 형상', '용접 형상', '(용접 형상)', None, None, None, '', (216, 50), (208, 56), None),
+    ]
+
+
 DRAWINGS = [
     ('A', '도면A_브래킷', 420, 297, drawing_a),
     ('B', '도면B_용접구조물', 420, 297, drawing_b),
     ('C', '도면C_축', 297, 210, drawing_c),
+    ('D', '도면D_윤곽선글자', 420, 297, drawing_d),
 ]
 
 
@@ -521,14 +772,18 @@ def main():
     for key, name, w, h, fn in DRAWINGS:
         plain = SAMPLES / (name + '_풍선없음.pdf')
         ball = SAMPLES / (name + '_풍선있음.pdf')
-        s = Sheet(plain, w, h)
+        K = OutlineSheet if key == 'D' else Sheet
+        s = K(plain, w, h)
         items = fn(s)
         s.save()
-        s2 = Sheet(ball, w, h)
+        s2 = K(ball, w, h)
         fn(s2)
         for it in items:
             no, bxy, target, via = it[0], it[8], it[9], it[10]
-            s2.balloon(bxy[0], bxy[1], no, target, via)
+            if key == 'D':
+                s2.ix_balloon(bxy[0], bxy[1], no, target)
+            else:
+                s2.balloon(bxy[0], bxy[1], no, target, via)
         s2.save()
         write_answer(SAMPLES / (name + '_정답.xlsx'), name, items)
         js[key + '_plain'] = base64.b64encode(plain.read_bytes()).decode()

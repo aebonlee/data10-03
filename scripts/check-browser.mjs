@@ -1,7 +1,7 @@
 // 헤드리스 브라우저로 주요 흐름 점검 (선택 — playwright-core 가 있는 PC 에서만)
 //   PLAYWRIGHT_CORE=/경로/node_modules/playwright-core node scripts/check-browser.mjs
 // file:// 로 index.html 을 열어 예시 도면 A(풍선 없음) → 후보 확인 · 글자 눌러 추가 · 제외 영역 그리기·지우기 → 목표 1 풍선 배치 · 끌어 옮기기
-// → 풍선 PDF · 엑셀 내려받아 다시 읽기 → 일치율(예시 정답) · 기록 → 예시 도면 B·C(풍선 있음) 목표 2 → 설정 순서로 누르고,
+// → 풍선 PDF · 엑셀 내려받아 다시 읽기 → 일치율(예시 정답) · 기록 → 예시 도면 B·C(풍선 있음) 목표 2 → 도면 D(윤곽선 · 기준서 구분) → 설정 순서로 누르고,
 // JS 오류와 폭별 가로 넘침을 잽니다. BREAK=1 이면 일부러 넓은 상자를 넣어 넘침 점검기가 잡는지 봅니다.
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -94,9 +94,9 @@ const sc = L.scoreResults(g2.map(L.toPred), require(path.join(root, 'js/sample-p
 ok(back.length === 1 && g2.length === 14 && sc.valueRate === 1, '내려받은 풍선 PDF 다시 읽기: 풍선 ' + g2.length + '개 · 값 일치 ' + sc.valueRate + ' · ' + Math.round(pdf.bytes.length / 1024) + 'KB');
 const x1 = await dl(() => clickText('button', '엑셀 내려받기'));
 const wb = XLSX.read(x1.bytes, { type: 'buffer' });
-ok(wb.SheetNames.join(',') === '검사항목,도면 정보,제외된 글자', '엑셀 시트 3개');
-const rows = XLSX.utils.sheet_to_json(wb.Sheets['검사항목'], { header: 1 });
-ok(rows.length === 15 && rows[0][0] === '번호' && rows.slice(1).every(r => r[3]), '엑셀 14행 + 머리');
+ok(wb.SheetNames.join(',') === '치수 기준서,용접 기준서,도면 정보,제외된 글자', '엑셀 시트 4개(치수 · 용접 기준서 나눔)');
+const rows = XLSX.utils.sheet_to_json(wb.Sheets['치수 기준서'], { header: 1 });
+ok(rows.length === 15 && rows[0][0] === '번호' && rows.slice(1).every(r => r[3]) && rows[1][22] === '치수', '치수 기준서 14행 + 머리 · 기준서 칸');
 const png = await dl(() => clickText('button', '이 쪽 PNG'));
 ok(png.bytes.slice(1, 4).toString() === 'PNG', 'PNG 내려받기');
 
@@ -131,7 +131,7 @@ await page.waitForTimeout(800);
 ok(await page.locator('main table.list img.thumb').count() >= 1, '용접 형상 그림 미리보기');
 await shot('04_extract_B');
 const x2 = await dl(() => clickText('button', '엑셀 내려받기'));
-const r2 = XLSX.utils.sheet_to_json(XLSX.read(x2.bytes, { type: 'buffer' }).Sheets['검사항목'], { header: 1 });
+const r2 = XLSX.utils.sheet_to_json(XLSX.read(x2.bytes, { type: 'buffer' }).Sheets['용접 기준서'], { header: 1 });
 const shapeRow = r2.find(r => r[4] === '용접 형상');
 ok(shapeRow && /\d/.test(shapeRow[21] || ''), '엑셀에 용접 형상 잘라낼 영역 좌표');
 await go('#/accuracy'); await clickText('button', '예시 정답 불러오기');
@@ -150,6 +150,21 @@ await page.waitForFunction(() => document.querySelectorAll('svg.ov g.bl').length
 ok(await page.locator('svg.ov g.bl.miss').count() === 1, '도면 C: 선으로 그린 「8」 풍선 1개는 연결 못 함');
 await go('#/accuracy'); await clickText('button', '예시 정답 불러오기');
 ok((await page.textContent('main')).includes('91.7%'), '도면 C 목표 2 일치율 91.7%');
+
+// 2차: 도면 D — 글자 층 없는 윤곽선 도면, 기준서 구분(치수 · 용접)
+await go('#/home');
+await page.locator('.sample-card', { hasText: '예시 도면 D' }).locator('button', { hasText: '풍선 없음' }).click();
+await page.waitForFunction(() => location.hash === '#/drawing' && document.querySelector('main').textContent.includes('검사 대상 후보'), null, { timeout: 30000 });
+ok((await page.textContent('main')).includes('윤곽선을 글자 모양과 맞춰 되읽었습니다'), '도면 D: 윤곽선 글자 되읽기 안내');
+await go('#/balloon'); await waitCanvas();
+await clickText('button', '용접 기준서');
+ok((await page.locator('svg.ov g.bl').count()) === 6, '용접 기준서만: 풍선 6개');
+await clickText('button', '치수 기준서');
+ok((await page.locator('svg.ov g.bl').count()) === 13, '치수 기준서만: 풍선 13개');
+await clickText('button', '전체');
+await go('#/accuracy'); await clickText('button', '예시 정답 불러오기');
+const dacc = await page.textContent('main');
+ok(dacc.includes('완전 일치율') && dacc.includes('필드 일치율 · 항목명'), '수강생 방식 일치율(필드 · 완전) 표시');
 
 await go('#/settings');
 ok((await page.textContent('main')).includes('AI 연결 설정'), '설정 화면 · AI 연결 설정');

@@ -13,8 +13,13 @@
       return page.getOperatorList().then(function (ol) {
         var items = L.pdfTextItems(tc.items, vp.transform, n);
         var paths = L.pathsFromOpList(ol.fnArray, ol.argsArray, OPS, vp.transform);
-        return { page: n, w: vp.width, h: vp.height, items: items, tokens: L.groupTokens(items, n), segs: paths.segs,
-          circles: L.findCircles(paths.subpaths), tris: L.findWeldTriangles(paths.subpaths) };
+        // 글자를 윤곽선으로 바꾼 PDF: 칠한 경로를 글자로 되읽고(4-1), 선으로 그린 Ø · 기하공차 기호를 붙입니다(4-2)
+        var ot = L.readOutlineText(paths.paints, n);
+        var segs = paths.segs.filter(function (s) { return !ot.used[s.pid]; });
+        var sym = L.strokeSymbols(paths.paints, segs, ot.items, ot.pageCap);
+        var all = items.concat(sym.items), circles = L.findCircles(paths.subpaths);
+        return { page: n, w: vp.width, h: vp.height, items: all, textItems: items.length, outlineItems: ot.items.length, tokens: L.groupTokens(all, n, circles), segs: segs,
+          circles: circles, tris: L.findWeldTriangles(paths.subpaths.filter(function (sp) { return !ot.used[sp.pid]; })), refs: L.findWeldRefs(segs) };
       });
     });
   }
@@ -53,7 +58,9 @@
     pages.forEach(function (pg) {
       // 이미 있는 풍선 숫자(원 안의 정수)는 검사 대상이 아니므로 뺍니다
       var pc = pageCandidates(pg, s, doc, { balloons: L.detectBalloons(pg, s) });
-      L.orderCandidates(pc.cands, pg, s).forEach(function (c) { ordered.push({ c: c, pg: pg }); });
+      // 기준서 구분(s.std = 'dim' 치수 · 'weld' 용접): 그 기준서 항목만 번호를 매깁니다
+      var list = s.std === 'dim' || s.std === 'weld' ? pc.cands.filter(function (c) { return (c.std || L.stdOf(c)) === s.std; }) : pc.cands;
+      L.orderCandidates(list, pg, s).forEach(function (c) { ordered.push({ c: c, pg: pg }); });
     });
     var used = {};
     ordered.forEach(function (x) { var n = doc.nums[x.c.id]; if (n) used[n] = 1; });
@@ -61,7 +68,7 @@
     var items = ordered.map(function (x) {
       var no = doc.nums[x.c.id];
       if (!no) { while (used[next]) next++; no = next; used[next] = 1; }
-      return { no: no, page: x.pg.page, zone: L.zoneOf(x.c, x.pg, s).label, cand: Object.assign({}, x.c, { no: no }), pg: x.pg };
+      return { no: no, page: x.pg.page, zone: L.zoneOf(x.c, x.pg, s).label, cand: Object.assign({}, x.c, { no: no }), std: x.c.std || L.stdOf(x.c), pg: x.pg };
     });
     pages.forEach(function (pg) {
       var mine = items.filter(function (x) { return x.page === pg.page; }).sort(function (a, b) { return a.no - b.no; });
@@ -81,6 +88,7 @@
     pages.forEach(function (pg) {
       var balloons = L.detectBalloons(pg, s);
       var pc = pageCandidates(pg, s, doc, { balloons: balloons });
+      if (s.std === 'dim' || s.std === 'weld') pc.cands = pc.cands.filter(function (c) { return (c.std || L.stdOf(c)) === s.std; }); // 그 기준서 항목에만 잇기
       var links = L.linkBalloons(balloons, pc.cands, pg, s);
       var byId = {};
       pc.cands.forEach(function (c) { byId[c.id] = c; });
@@ -89,7 +97,7 @@
         if (ov === 'none') { lk.candId = null; lk.method = '사람이 비움'; }
         else if (ov && byId[ov]) { lk.candId = ov; lk.method = '사람이 연결'; lk.check = false; lk.crop = null; }
         var c = lk.candId ? byId[lk.candId] : null;
-        out.push({ no: lk.no, page: lk.page, zone: c ? L.zoneOf(c, pg, s).label : '', cand: c, balloon: { x: lk.balloon.cx, y: lk.balloon.cy, r: lk.balloon.r, src: lk.balloon.src },
+        out.push({ no: lk.no, page: lk.page, zone: c ? L.zoneOf(c, pg, s).label : '', cand: c, std: c ? (c.std || L.stdOf(c)) : '', balloon: { x: lk.balloon.cx, y: lk.balloon.cy, r: lk.balloon.r, src: lk.balloon.src },
           leader: lk.leader, target: lk.target, method: lk.method === 'leader' ? '지시선' : lk.method === 'near' ? '가까운 글자' : lk.method === 'none' ? '연결 못 함' : lk.method,
           check: lk.check || (lk.balloon.check) || (c && c.check), crop: lk.crop || (c && c.crop) || null,
           note: lk.method === 'none' ? (lk.target ? '지시선 끝 근처에 글자가 없음 — 형상만 있는 표기일 수 있음' : '가까운 글자가 없음') : '' });

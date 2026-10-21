@@ -3,7 +3,7 @@
 (function () {
   'use strict';
   var L = window.DRLogic, F = window.DRFlow, S = window.DRStore, SM = window.DRSample, XLSX = window.XLSX;
-  var CAT_COLOR = { '치수': '#1f5fa8', '공차': '#8a2be2', '기하공차': '#0f7b6c', '용접': '#c2410c', '기타': '#6b7280' };
+  var CAT_COLOR = { '치수': '#1f5fa8', '공차': '#8a2be2', '기하공차': '#0f7b6c', '용접': '#c2410c', '주기': '#a16207', '기타': '#6b7280' };
 
   var db = S.loadDb();
   var cur = null;        // { key, name, size, pdf, pages: [쪽 자료], sample }
@@ -159,9 +159,9 @@
           var d = doc(); d.opened = nowText(); db.cur = key; save();
           if (!sample) S.putPdf(key, bytes);
           if (!quiet) {
-            var nText = pages.reduce(function (a, p) { return a + p.items.length; }, 0);
-            if (!nText) toast('이 PDF 에는 글자 층이 없습니다(스캔·그림 또는 글자를 선으로 바꾼 출력). 1단계로는 읽을 수 없고 2단계(OCR) 대상입니다.', true);
-            else toast(name + ' — ' + pages.length + '쪽, 글자 ' + nText + '조각을 읽었습니다.' + (cur.ballooned ? ' 번호 풍선이 있는 도면으로 보여 「목표 2 · 풍선 읽기」로 갑니다.' : ''));
+            var nText = pages.reduce(function (a, p) { return a + p.items.length; }, 0), nOut = pages.reduce(function (a, p) { return a + (p.outlineItems || 0); }, 0);
+            if (!nText) toast('이 PDF 에서 글자를 찾지 못했습니다(스캔 그림이거나 윤곽선으로도 읽히지 않는 글꼴). 2단계(OCR) 대상입니다.', true);
+            else toast(name + ' — ' + pages.length + '쪽, 글자 ' + nText + '조각을 읽었습니다' + (nOut ? '(그중 ' + nOut + '조각은 글자 층이 없어 윤곽선 모양으로 되읽음)' : '') + '.' + (cur.ballooned ? ' 번호 풍선이 있는 도면으로 보여 「목표 2 · 풍선 읽기」로 갑니다.' : ''));
             location.hash = cur.ballooned ? '#/extract' : '#/drawing';
           }
           render();
@@ -397,7 +397,7 @@
     main.appendChild(h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, '일치율 기록'), h('a', { class: 'dp-more', href: '#/accuracy' }, '측정하러 가기')),
       hist.length ? trendChart(hist, settings().target) : h('p', { class: 'note' }, '아직 기록이 없습니다. 「일치율 측정」에서 정답 엑셀과 대조한 뒤 「측정 기록에 남기기」를 누르면 여기에 쌓입니다. 규칙을 고칠 때마다 같은 도면으로 다시 재면 85% 에 얼마나 다가갔는지 보입니다.')));
     main.appendChild(h('section', { class: 'card' }, h('h2', null, '1단계에서 할 수 있는 것과 못 하는 것'), h('ul', { class: 'limits' },
-      h('li', null, h('strong', null, '벡터 PDF 만 읽습니다. '), 'CAD 에서 PDF 로 내보내 글자를 고를 수 있는 도면이어야 합니다. 스캔 그림 · 글자를 선으로 바꾼 PDF 는 글자 층이 없어 읽지 못합니다(2단계 OCR).'),
+      h('li', null, h('strong', null, '벡터 PDF 를 읽습니다. '), '글자 층이 있으면 그대로, 글자를 칠한 윤곽선으로 바꾼 PDF 는 글자 모양을 참조 글꼴과 맞춰 되읽습니다(2차). 스캔 그림과 한 줄 선으로 쓴 글꼴(스트로크 글꼴)은 아직 못 읽습니다(OCR 대상).'),
       h('li', null, h('strong', null, '규칙(휴리스틱)으로 찾습니다. '), '치수 형식 · 표제란 낱말 · 원과 지시선의 기하로 판단하므로, 회사 도면 양식이 다르면 설정의 낱말·거리 기준을 맞춰야 합니다. 그래서 정답과 대조하는 측정부터 합니다.'),
       h('li', null, h('strong', null, '풍선 PDF 는 원본 쪽을 고해상도 그림으로 넣고 그 위에 풍선을 벡터로 그립니다. '), '원본 글자는 보이지 않는 글자 층으로 같은 자리에 넣어 검색 · 다시 읽기가 됩니다. 원본 벡터를 그대로 두고 덧그리는 편집은 2단계입니다.'),
       h('li', null, h('strong', null, '애매한 후보는 AI 에게 물을 수 있습니다(선택). '), '프롬프트를 복사해 회사가 허용한 AI 에 붙여 넣는 방식이 기본이고, 키는 이 도구에 없습니다.'))));
@@ -416,11 +416,12 @@
   function docInfo() {
     var p = pg(), pc = pageCands(ui.page), nText = cur.pages.reduce(function (a, q) { return a + q.items.length; }, 0);
     var out = h('div', null);
-    if (!nText) add(out, h('div', { class: 'alert error' }, '이 PDF 에는 글자 층이 없습니다. 스캔 그림이거나 CAD 가 글자를 선으로 바꿔 내보낸 파일입니다. 1단계 규칙으로는 읽을 수 없습니다 — CAD 에서 「글자를 글자로(TrueType 유지)」 내보내기를 해 보시고, 안 되면 2단계(OCR) 대상입니다.'));
-    else if (!p.items.length) add(out, h('div', { class: 'alert warn' }, '이 쪽에는 글자 층이 없습니다.'));
+    if (!nText) add(out, h('div', { class: 'alert error' }, '이 PDF 에서 글자를 찾지 못했습니다. 스캔 그림이거나, 글자를 윤곽선으로 바꿨는데 참조 글꼴(산세리프)과 모양이 크게 다른 경우입니다. CAD 에서 「글자를 글자로(TrueType 유지)」 내보내기를 해 보시고, 안 되면 2단계(OCR) 대상입니다.'));
+    else if (!p.items.length) add(out, h('div', { class: 'alert warn' }, '이 쪽에는 글자가 없습니다.'));
+    else if (p.outlineItems && !p.textItems) add(out, h('div', { class: 'alert info' }, '이 쪽은 글자 층이 없어 칠한 윤곽선을 글자 모양과 맞춰 되읽었습니다(' + p.outlineItems + '조각). 선으로 그린 Ø · 기하공차 기호 · × · ° 도 붙였습니다. 틀린 글자는 오른쪽 칸에서 고쳐 주세요.'));
     if (cur.ballooned) add(out, h('div', { class: 'alert info' }, '이 도면에는 번호 풍선이 이미 있습니다(원 안의 숫자 ' + L.detectBalloons(p, settings()).length + '개, 이 쪽). 풍선별 정보를 뽑으려면 ', h('a', { href: '#/extract' }, '목표 2 · 풍선 읽기'), '로 가세요. 아래 후보 목록에서는 풍선 숫자를 뺐습니다.'));
     add(out, h('div', { class: 'kpis' }, kpi('이 쪽 글자 조각', String(p.items.length), '개'), kpi('붙인 토큰', String(p.tokens.length), '개'), kpi('검사 대상 후보', String(pc.cands.length), '개'),
-      kpi('제외됨', String(pc.excluded.length), '개'), kpi('확인 필요', String(pc.cands.filter(function (c) { return c.check; }).length), '개'), kpi('선 · 원 · 용접 기호', p.segs.length + ' · ' + p.circles.length + ' · ' + p.tris.length, '', 'sm')));
+      kpi('제외됨', String(pc.excluded.length), '개'), kpi('확인 필요', String(pc.cands.filter(function (c) { return c.check; }).length), '개'), kpi('선 · 원 · 용접 기호', p.segs.length + ' · ' + p.circles.length + ' · ' + (p.tris.length + (p.refs ? p.refs.length : 0)), '', 'sm')));
     return out;
   }
   function renderDrawing(main) {
@@ -527,6 +528,16 @@
   }
 
   // ── 목표 1 · 풍선 배치 ────────────────────────────────────
+  var STD_NAME = { all: '전체', dim: '치수 기준서', weld: '용접 기준서' };
+  /* 기준서 구분 — 치수 기준서(치수 · 공차 · 기하공차 · 기타) / 용접 기준서(용접 크기 · 단속 · 용접 형상 · 용접 부기). 한 도면에 둘 다 있을 수 있음 */
+  function stdSwitch(note) {
+    var s = settings();
+    return h('section', { class: 'card' }, h('h2', null, '기준서 구분'),
+      h('div', { class: 'seg', role: 'group', 'aria-label': '기준서 구분' }, ['all', 'dim', 'weld'].map(function (k) {
+        return h('button', { type: 'button', 'aria-pressed': String((s.std || 'all') === k), onclick: function () { db.settings.std = k; save(); render(); } }, STD_NAME[k]);
+      })),
+      h('p', { class: 'note', style: 'margin-top:8px' }, note || '치수 기준서 = 치수 · 공차 · 기하공차 · 표면 거칠기, 용접 기준서 = 용접 크기(a · z) · 단속(개수x길이) · 글자 없는 용접 기호(형상) · 용접 기호에 딸린 문장(부기). 고르면 그 기준서 항목만 1번부터 번호를 매기고, 엑셀 · 풍선 PDF 도 따로 나옵니다. 「전체」로 엑셀을 받으면 두 기준서가 시트로 나뉩니다.'));
+  }
   function balloonOptions() {
     var s = settings();
     function num(k, label, min, max, step, hint) {
@@ -559,6 +570,7 @@
         h('button', { type: 'button', class: 'btn', onclick: function () { exportExcel(items, 1); } }, '엑셀 내려받기'))));
     if (cur.ballooned) main.appendChild(h('div', { class: 'alert warn' }, '이 도면에는 풍선이 이미 있습니다. 풍선별 정보를 뽑으려면 ', h('a', { href: '#/extract' }, '목표 2'), ' 를 쓰세요(여기서는 원래 풍선 숫자를 빼고 새로 답니다).'));
     main.appendChild(h('div', { class: 'kpis' }, kpi('풍선', String(items.length), '개'), kpi('이 쪽', String(here.length), '개'), kpi('확인 필요', String(items.filter(function (x) { return x.cand.check; }).length), '개'), kpi('겹침 남음', String(ovl), '개', ovl ? 'bad' : '')));
+    main.appendChild(stdSwitch());
     main.appendChild(balloonOptions());
     var selIt = ui.selB ? items.filter(function (x) { return x.cand.id === ui.selB; })[0] : null;
     var v = viewer({
@@ -633,6 +645,7 @@
     var miss = items.filter(function (x) { return !x.cand; }).length;
     main.appendChild(pageHead('목표 2 · 풍선 읽기', '원 안의 숫자를 풍선으로 읽고, 지시선 끝이나 가장 가까운 치수 · 공차 · 기하공차 · 용접 표기와 연결합니다. 글자 없이 형상만 가리키면 그 둘레를 잘라 「형상」 그림으로 남깁니다.',
       h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn btn-primary', onclick: function () { exportExcel(items, 2); } }, '엑셀 내려받기'), h('a', { class: 'btn', href: '#/accuracy' }, '일치율 재기'))));
+    main.appendChild(stdSwitch('이 풍선 PDF 가 치수 기준서용인지 용접 기준서용인지 고르면, 풍선을 그 기준서 항목에만 잇습니다(치수 풍선이 옆의 용접 글자에 붙는 일을 막음). 「전체」면 모든 항목에 잇습니다.'));
     main.appendChild(h('div', { class: 'kpis' }, kpi('찾은 풍선', String(items.length), '개'), kpi('연결됨', String(items.length - miss), '개'), kpi('연결 못 함', String(miss), '개', miss ? 'bad' : ''),
       kpi('확인 필요', String(items.filter(function (x) { return x.check; }).length), '개')));
     if (!items.length) main.appendChild(h('div', { class: 'alert warn' }, '원 안의 숫자(풍선)를 찾지 못했습니다. 풍선이 원 없이 숫자만 있거나, 원이 곡선이 아닌 다각형이면 아래 설정을 켜 보세요. 풍선이 없는 도면이면 ', h('a', { href: '#/balloon' }, '목표 1'), ' 을 쓰세요.'));
@@ -673,19 +686,27 @@
   function infoSheet(goal, items) {
     var s = settings();
     return [['항목', '값'], ['도면 파일', cur.name], ['쪽 수', cur.pages.length], ['작업', goal === 1 ? '목표 1 — 풍선 자동 배치(풍선 없는 도면)' : '목표 2 — 풍선별 정보 추출(풍선 있는 도면)'],
-      ['만든 시각', nowText()], ['인식 방식', '1단계 규칙 인식 — 벡터 PDF 글자 층 + 원·지시선·용접 삼각형 기하. 스캔 그림은 읽지 못함'],
+      ['만든 시각', nowText()], ['기준서', STD_NAME[settings().std || 'all']], ['인식 방식', '규칙 인식 — 벡터 PDF 글자 층(없으면 칠한 윤곽선을 글자 모양과 맞춰 되읽음) + 원·지시선·기하공차 기호·용접 기준선 기하. 스캔 그림은 읽지 못함'],
       ['항목 수', items.length], ['확인 필요', items.filter(function (x) { return x.check || (x.cand && x.cand.check); }).length], ['용접 형상', items.filter(function (x) { return x.cand && x.cand.shape; }).length],
       ['번호 순서', goal === 1 ? ({ rows: '줄', cols: '열', zone: '구역' }[s.order]) : '도면의 풍선 번호'], ['좌표', 'mm, 쪽 왼쪽 위가 (0, 0)'],
       ['주의', '이 표는 자동 인식 결과 초안입니다. 「확인 필요」 행과 연결 못 함 행은 반드시 사람이 확인해 주세요.']].concat(cur.sample ? [['예시', '가상 도면 — 실제 도면이 아님']] : []);
   }
   function exportExcel(items, goal) {
-    var rows = [L.ROW_HEAD].concat(items.map(L.itemRow));
-    var sheets = { '검사항목': rows, '도면 정보': infoSheet(goal, items) };
+    var s = settings(), std = s.std || 'all', sheets = {};
+    if (std === 'all') {
+      // 두 기준서를 시트로 나눔. 목표 1 은 기준서마다 1번부터 다시 매김, 목표 2 는 도면의 풍선 번호 그대로
+      ['dim', 'weld'].forEach(function (k) {
+        var list = goal === 1 ? F.goal1(cur.pages, Object.assign({}, s, { std: k }), doc()) : items.filter(function (x) { return x.std === k || (!x.cand && k === 'dim'); });
+        sheets[STD_NAME[k]] = [L.ROW_HEAD].concat(list.map(L.itemRow));
+      });
+    } else sheets[STD_NAME[std]] = [L.ROW_HEAD].concat(items.map(L.itemRow));
+    sheets['도면 정보'] = infoSheet(goal, items);
     var ex = [['쪽', '글자', '제외 이유']];
     cur.pages.forEach(function (p) { pageCands(p.page).excluded.forEach(function (x) { ex.push([p.page, x.raw, x.reason]); }); });
     sheets['제외된 글자'] = ex;
-    writeXlsx(safeName(cur.name) + (goal === 1 ? '_풍선배치_' : '_풍선별정보_') + stamp() + '.xlsx', sheets,
-      { '검사항목': [6, 5, 6, 9, 11, 18, 9, 9, 9, 10, 10, 6, 6, 8, 8, 8, 10, 10, 10, 9, 30, 30], '도면 정보': [14, 70], '제외된 글자': [5, 30, 14] });
+    var W = [6, 5, 6, 9, 11, 18, 9, 9, 9, 10, 10, 6, 6, 8, 8, 8, 10, 10, 10, 9, 30, 30, 10];
+    writeXlsx(safeName(cur.name) + (goal === 1 ? '_풍선배치_' : '_풍선별정보_') + (std === 'all' ? '' : STD_NAME[std].replace(/\s/g, '') + '_') + stamp() + '.xlsx', sheets,
+      { '치수 기준서': W, '용접 기준서': W, '도면 정보': [14, 70], '제외된 글자': [5, 30, 14] });
   }
   function drawBalloonsOn(ctx, k, list) {
     list.forEach(function (x) {
@@ -713,7 +734,7 @@
     (function next() {
       if (i >= cur.pages.length) {
         var bytes = L.buildBalloonPdf(out);
-        download(safeName(cur.name) + '_풍선_' + stamp() + '.pdf', new Blob([bytes], { type: 'application/pdf' }));
+        download(safeName(cur.name) + '_풍선_' + ((settings().std || 'all') === 'all' ? '' : STD_NAME[settings().std].replace(/\s/g, '') + '_') + stamp() + '.pdf', new Blob([bytes], { type: 'application/pdf' }));
         toast('풍선 PDF 를 내려받았습니다(' + Math.round(bytes.length / 1024) + 'KB). 원본 쪽은 그림 + 보이지 않는 글자 층, 풍선은 벡터입니다.');
         return;
       }
@@ -770,6 +791,7 @@
       h('button', { type: 'button', 'aria-pressed': String(mode === 'number'), onclick: function () { ui.accMode = 'number'; render(); } }, '목표 2 — 풍선 읽기(번호로 짝)')),
       h('p', { class: 'note', style: 'margin-top:8px' }, mode === 'value' ? '풍선 없는 도면에서 도구가 찾은 항목을 정답과 값(구분 · 공칭 · 상하한)으로 짝짓습니다. 도구의 번호 순서는 사람과 다를 수 있어 「번호 같음」은 따로 셉니다.'
         : '풍선 있는 도면에서 같은 번호끼리 짝짓고, 그 풍선에 연결된 값이 정답과 같은지 봅니다.')));
+    main.appendChild(stdSwitch('정답 엑셀이 치수 기준서인지 용접 기준서인지 고르면 그 기준서 항목끼리만 대조합니다.'));
     if (!d.truth) return;
     var items = mode === 'value' ? g1() : g2();
     var sc = L.scoreResults(items.map(L.toPred), d.truth.items, mode);
@@ -777,6 +799,9 @@
     main.appendChild(h('section', { class: 'card' }, h('h2', null, '3. 결과'),
       h('div', { class: 'kpis' }, kpi('값 일치율(정답 중 값까지 맞음)', pct(sc.valueRate), '', ok ? 'good' : 'bad'), kpi('정밀도', pct(sc.precision)), kpi('재현율', pct(sc.recall)), kpi('F1', pct(sc.f1)),
         mode === 'value' ? kpi('번호 같음', pct(sc.numberRate)) : null, kpi('정답 · 찾음 · 맞게 찾음', sc.nTruth + ' · ' + sc.nPred + ' · ' + sc.tp, '', 'sm')),
+      h('h3', null, '지금 쓰시는 방식으로 잰 일치율'),
+      h('div', { class: 'kpis' }, kpi('필드 일치율 · 항목명', pct(sc.fieldRate.name)), kpi('필드 일치율 · 기준값', pct(sc.fieldRate.base)), kpi('필드 일치율 · 공차', pct(sc.fieldRate.tol)), kpi('완전 일치율', pct(sc.fullRate), '', sc.fullRate >= tgt ? 'good' : 'bad')),
+      h('p', { class: 'note' }, '필드 일치율 = 그 필드가 맞은 건수 ÷ 비교 대상(정답 행) × 100, 완전 일치율 = 항목명 · 기준값 · 공차가 모두 맞은 행 ÷ 비교 대상 행 × 100. 도구가 못 찾은 정답 행은 세 필드 모두 불일치로 셉니다. 항목명 = 종류(길이 · 지름 · 평면도 · 목두께 · 단속 · 부기 …), 기준값 = 공칭값(기하공차는 공차값, 단속은 개수x길이, 부기는 문장), 공차 = 상 · 하한(기하공차는 데이텀).'),
       h('div', { class: 'meter', role: 'img', 'aria-label': '값 일치율 ' + pct(sc.valueRate) + ', 목표 ' + s.target + '%' }, h('span', { style: 'width:' + (sc.valueRate * 100) + '%;' + (ok ? 'background:#1f9d55' : '') }), h('i', { style: 'left:' + s.target + '%' })),
       h('p', { class: 'note', style: 'margin-top:6px' }, ok ? '목표 ' + s.target + '% 이상입니다.' : '목표 ' + s.target + '% 까지 ' + Math.max(0, Math.ceil(tgt * sc.nTruth) - sc.exact) + '개 더 맞아야 합니다.'),
       h('details', { class: 'kw-box' }, h('summary', null, '숫자 읽는 법'), h('ul', { class: 'list-plain' },
@@ -784,7 +809,7 @@
         h('li', null, 'F1 = 정밀도와 재현율의 조화평균'), h('li', null, '값 일치율 = 정답 중 구분 · 공칭값 · 상한 · 하한까지 모두 같은 비율 — 「인식 일치율 85%」 는 이 숫자로 봅니다'))),
       h('div', { class: 'btn-row', style: 'margin-top:10px' }, h('input', { id: 'histMemo', placeholder: '메모(예: 표제란 낱말 추가 후)', style: 'min-height:44px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;flex:1 1 220px', 'aria-label': '기록 메모' }),
         h('button', { type: 'button', class: 'btn btn-primary', onclick: function () {
-          db.history.push({ at: nowText(), doc: cur.name, mode: mode, nTruth: sc.nTruth, nPred: sc.nPred, precision: sc.precision, recall: sc.recall, f1: sc.f1, valueRate: sc.valueRate, memo: (document.getElementById('histMemo') || {}).value || '' });
+          db.history.push({ at: nowText(), doc: cur.name, mode: mode, std: s.std || 'all', nTruth: sc.nTruth, nPred: sc.nPred, precision: sc.precision, recall: sc.recall, f1: sc.f1, valueRate: sc.valueRate, fullRate: sc.fullRate, fieldRate: sc.fieldRate, memo: (document.getElementById('histMemo') || {}).value || '' });
           save(); render(); toast('측정 기록에 남겼습니다.');
         } }, '측정 기록에 남기기'),
         h('button', { type: 'button', class: 'btn', onclick: function () { exportScore(sc, mode); } }, '대조 결과 엑셀'))));
@@ -806,7 +831,7 @@
   }
   function exportScore(sc, mode) {
     var sum = [['항목', '값'], ['도면', cur.name], ['정답 파일', doc().truth.name], ['대상', mode === 'value' ? '목표 1(값으로 짝)' : '목표 2(번호로 짝)'], ['측정 시각', nowText()],
-      ['정답 수', sc.nTruth], ['도구가 찾은 수', sc.nPred], ['맞게 찾음', sc.tp], ['값까지 맞음', sc.exact], ['정밀도', sc.precision], ['재현율', sc.recall], ['F1', sc.f1], ['값 일치율', sc.valueRate], ['목표', settings().target / 100]];
+      ['정답 수', sc.nTruth], ['도구가 찾은 수', sc.nPred], ['맞게 찾음', sc.tp], ['값까지 맞음', sc.exact], ['정밀도', sc.precision], ['재현율', sc.recall], ['F1', sc.f1], ['값 일치율', sc.valueRate], ['필드 일치율 · 항목명', sc.fieldRate.name], ['필드 일치율 · 기준값', sc.fieldRate.base], ['필드 일치율 · 공차', sc.fieldRate.tol], ['완전 일치율', sc.fullRate], ['기준서', STD_NAME[settings().std || 'all']], ['목표', settings().target / 100]];
     var cat = [['구분', '정답', '찾음', '값까지 맞음']]; Object.keys(sc.byCat).forEach(function (c) { var b = sc.byCat[c]; cat.push([c, b.truth, b.found, b.exact]); });
     var bad = [['종류', '정답 번호', '정답', '도구 번호', '도구']];
     sc.misses.forEach(function (m) { bad.push(['놓침', m.no, m.text, '', '']); });
@@ -823,11 +848,12 @@
     function num(k, label, min, max, step, hint) { return field(label, h('input', { type: 'number', min: min, max: max, step: step || 1, value: s[k], onchange: function (e) { var o = {}; o[k] = +e.target.value; db.settings = L.cleanSettings(Object.assign({}, s, o)); save(); toast('저장했습니다.'); } }), hint); }
     var kw = h('textarea', { rows: 4 }, s.titleKeywords);
     main.appendChild(h('section', { class: 'card' }, h('h2', null, '제외 영역 자동 찾기'),
-      chk('autoBorder', '테두리 띠(구역 번호 1, 2, 3 · A, B, C) 안의 글자 빼기'), num('borderPct', '테두리 띠 폭(쪽 짧은 변의 %)', 0, 15, 0.5),
+      chk('autoBorder', '테두리 띠(구역 번호 1, 2, 3 · A, B, C) 안의 글자 빼기'), num('borderPct', '테두리 띠 폭(쪽 짧은 변의 %)', 0, 15, 0.5), num('borderMaxMm', '테두리 띠 폭 상한(mm) — A0 처럼 큰 도면용', 2, 60),
       chk('autoTitle', '표제란 · 개정란 빼기(아래 낱말이 2개 이상 모인 오른쪽 아래 · 오른쪽 위 영역)'),
       field('표제란 낱말(쉼표로 구분)', kw, '회사 표제란에 쓰는 칸 이름을 더하세요(예: 도면번호, 품번, 재질)'),
       h('button', { type: 'button', class: 'btn', onclick: function () { db.settings.titleKeywords = kw.value; save(); toast('저장했습니다.'); } }, '낱말 저장'),
-      chk('autoNotes', '주기(NOTES) 문장 속 숫자 빼기'), chk('includeEtc', '표면 거칠기(Ra) 등 「기타」도 후보로')));
+      chk('autoNotes', '주기(NOTES) 문장 속 숫자 빼기'), chk('includeEtc', '표면 거칠기(Ra) 등 「기타」도 후보로'),
+      chk('skipReportPages', '부품표 · 보고서 쪽(원 · 곡선이 하나도 없고 낱말이 많은 쪽)은 통째로 빼기')));
     main.appendChild(h('section', { class: 'card' }, h('h2', null, '풍선 · 연결 · 목표'), h('div', { class: 'form-grid three' },
       num('balloonR', '풍선 반지름(mm)', 1.5, 12, 0.5), num('linkMaxMm', '지시선 끝 ~ 글자 최대 거리(mm)', 2, 60), num('nearMaxMm', '지시선 없는 풍선 ~ 글자 최대 거리(mm)', 2, 60),
       num('target', '목표 값 일치율(%)', 50, 100), num('zoneCols', '구역 열 수', 1, 26), num('zoneRows', '구역 행 수', 1, 20))));

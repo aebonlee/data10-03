@@ -1,5 +1,7 @@
 // 실행: node test/logic.test.mjs   (설치 없음 — vendor 의 pdf.js · SheetJS 만 씀)
-// 실제 회사 도면은 아직 받지 않았습니다. 가상 글자 조각과 scripts/make-samples.py 로 만든 가상 도면 3종으로 검사합니다.
+// 실제 회사 도면은 리포에 넣지 않습니다. 가상 글자 조각과 scripts/make-samples.py 로 만든 가상 도면 4종으로 검사합니다.
+// 도면 D(2차) = 실제 도면 2장에서 드러난 틀림 유형(글자 층 없는 윤곽선 글자 · 선으로 그린 Ø/×/°/기하공차 기호 · 같은 크기로 쌓인 공차 ·
+//              떨어진 ±1 · ISO 용접 기준선 · a 크기 · 개수x길이 · 부기 · 양면 · 형상만 · 품번 풍선 · 빨간 두 토막 지시선)을 흉내 낸 가상 도면.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
@@ -292,7 +294,110 @@ test('저장 형식 되살리기 · 설정 범위 · AI 설정 저장 칸 이름
   assert.equal(L.itemRow({ no: 1, page: 1, cand: { cat: '공차', nominal: 45, upper: 0.1, lower: -0.1, cx: 72, cy: 72 } })[9], 45.1);
 });
 
-section('예시 도면 3종 — 전체 흐름(pdf.js)');
+section('2차 — 윤곽선 글자 · 선 기호 · 용접 기준선 · 기준서 구분 · 수강생 일치율');
+const pagesD = await M.readPages(lib, Buffer.from(Sample.pdf['D_plain'], 'base64'));
+const pagesDb = await M.readPages(lib, Buffer.from(Sample.pdf['D_ball'], 'base64'));
+test('도면 D: 글자 층이 없어도 칠한 윤곽선을 글자로 되읽음(돌린 글 · 비스듬한 글 · 「1」 띄어쓰기)', () => {
+  const pg = pagesD[0];
+  assert.equal(pg.textItems, 0);
+  assert.ok(pg.outlineItems > 40, '윤곽선 글자 ' + pg.outlineItems);
+  const toks = pg.tokens.map(t => t.str);
+  for (const want of ['1240', '27.5°', '1141 ±1', 'a3.5', '4x40']) assert.ok(toks.includes(want), want + ' 없음: ' + toks.join(' | '));
+  const t39 = pg.tokens.find(t => t.str === '27.5°');
+  assert.ok(Math.abs(t39.a * 180 / Math.PI + 25) < 4, '비스듬한 각도 ' + t39.a);
+  assert.ok(Math.abs(Math.abs(pg.tokens.find(t => t.str === '1240').a) - Math.PI / 2) < 0.05, '세로 글');
+});
+test('선으로 그린 기호: Ø · × · ° 를 글자에 붙이고, 기하공차 기호(⌖ ▱ ∥ ⊥)는 틀 칸 글자와 묶음 · 빗금은 ∥ 아님', () => {
+  const toks = pagesD[0].tokens.map(t => t.str);
+  for (const want of ['2 x 45°', '⌖ Ø0.3', '▱ 1.5 CZ', '∥ 0.2 B', '⊥ Ø0.2 B']) assert.ok(toks.includes(want), want + ' 없음: ' + toks.join(' | '));
+  assert.ok(!toks.includes('∥'), '칸 글자 없는 ∥(빗금 · 빈 네모 속 기호)가 홀로 남음');
+  assert.deepEqual([L.classifyToken('▱ 1.5 CZ').kind, L.classifyToken('▱ 1.5 CZ').upper], ['평면도', 1.5]);
+});
+test('윤곽선 글자: 숫자 사이 기준선 아래로 내려간 작은 점은 쉼표(소수점) — 참조 글꼴에 없는 모양이어도', () => {
+  const R = require('../js/glyph-ref.js'), k = 0.09; // 대문자 높이 9pt
+  const glyph = (ch, ox) => R[ch].map(f => { const p = []; for (let i = 0; i + 1 < f.length; i += 2) p.push([ox + f[i] * k, 100 - f[i + 1] * k]); return p; });
+  const subs = [...glyph('4', 10), [[16.2, 99.5], [17.4, 99.5], [17.0, 102.2], [16.0, 102.2]], ...glyph('5', 18.5)].map(pts => ({ pts, curves: 0, closed: true }));
+  const r = L.readOutlineText([{ pid: 0, kind: 'f', fill: '0,0,0', subs }], 1);
+  assert.deepEqual(r.items.map(i => i.str), ['4,5']);
+  assert.equal(L.classifyToken('4,5').nominal, 4.5);
+});
+test('부품표 · 보고서 쪽은 통째로 빼고, 앞자리 0 표식 번호(02 · 08)는 치수 아님', () => {
+  const words = Array.from({ length: 14 }, (_, i) => ({ str: 'PLATE WA ' + i, cx: 10, cy: 10 + i * 10, box: L.box(0, 0, 1, 1) }));
+  const nums = Array.from({ length: 16 }, (_, i) => ({ id: 'n' + i, str: String(i + 10), cx: 300, cy: 10 + i * 10, h: 10, a: 0, box: L.box(290, 5 + i * 10, 310, 12 + i * 10) }));
+  const pg = { page: 3, w: 842, h: 595, tokens: words.concat(nums), circles: [], refs: [] };
+  assert.equal(L.isReportPage(pg), true);
+  assert.equal(L.detectCandidates(pg, L.cleanSettings(), {}).cands.length, 0);
+  assert.ok(L.detectCandidates(pg, L.cleanSettings({ skipReportPages: false }), {}).cands.length > 0);
+  assert.equal(L.isReportPage(Object.assign({}, pg, { circles: [{ cx: 1, cy: 1, r: 3 }] })), false);
+  assert.equal(L.isReportPage(pagesD[0]), false);
+  assert.equal(L.classifyToken('02').cat, null); assert.equal(L.classifyToken('0.5').nominal, 0.5);
+});
+test('A0 처럼 큰 도면: 테두리 띠는 12mm 까지만(안쪽 용접 크기 글자를 테두리로 빼지 않음)', () => {
+  const tok = (str, y) => ({ id: str, str, cx: 900, cy: y, h: 10, a: 0, v: y, box: L.box(890, y - 5, 910, y + 5) });
+  const pg = { page: 1, w: 3370, h: 2384, tokens: [tok('a3.5', 85), tok('7', 15)], circles: [{ cx: 0, cy: 0, r: 1 }] };
+  const c = L.detectCandidates(pg, L.cleanSettings(), {});
+  assert.deepEqual(c.cands.map(x => x.raw), ['a3.5']);
+  assert.deepEqual(c.excluded.map(x => x.raw), ['7']);
+});
+test('같은 크기로 쌓인 공차 · 떨어진 ±1 · 「6x」+「M12」 잇기', () => {
+  const toks = pagesD[0].tokens.map(t => t.str);
+  for (const want of ['Ø45 +0.08/+0.02', '58 +1/0', '352 ±1', '6x M12']) assert.ok(toks.includes(want), want + ' 없음: ' + toks.join(' | '));
+  const c = L.classifyToken('Ø45 +0.08/+0.02');
+  assert.deepEqual([c.cat, c.kind, c.nominal, c.upper, c.lower], ['공차', '지름', 45, 0.08, 0.02]);
+});
+test('ISO 용접 기준선(실선 + 점선): a 크기 · 개수x길이 · 부기 따로, 양면은 둘, 크기 없는 기호만 「용접 형상」', () => {
+  const pg = pagesD[0];
+  assert.equal(pg.refs.length, 3, '기준선 ' + pg.refs.length);
+  const c = F.pageCandidates(pg, L.cleanSettings({ std: 'weld' }), {}, { balloons: L.detectBalloons(pg, S) }).cands.filter(x => L.stdOf(x) === 'weld');
+  const by = k => c.filter(x => x.kind === k).map(x => x.raw);
+  assert.deepEqual(by('목두께').sort(), ['a3.5', 'a6.3', 'a6.3']);
+  assert.deepEqual(by('단속'), ['4x40']);
+  assert.equal(by('용접 형상').length, 1, '형상 ' + JSON.stringify(by('용접 형상')));
+  const note = c.find(x => x.kind === '용접 부기');
+  assert.ok(note && L.normNote(note.raw).replace(/\s/g, '') === 'DONOTWELD#12AREA', '부기 ' + (note && note.raw));
+  const sx = L.classifyToken('3x40(180°)');
+  assert.deepEqual([sx.cat, sx.kind, sx.count, sx.nominal, sx.spec], ['용접', '단속', 3, 40, '3x40(180°)']);
+  assert.equal(L.classifyToken('2x').cat, null);
+});
+test('기준서 구분: 치수 · 용접을 따로 1번부터, 풍선 읽기는 그 기준서 항목에만 연결', () => {
+  const gd = F.goal1(pagesD, L.cleanSettings({ std: 'dim' }), {}), gw = F.goal1(pagesD, L.cleanSettings({ std: 'weld' }), {});
+  assert.equal(gd.length, 13); assert.equal(gw.length, 6);
+  assert.deepEqual(gd.map(x => x.no), Array.from({ length: 13 }, (_, i) => i + 1));
+  assert.deepEqual(gw.map(x => x.no), [1, 2, 3, 4, 5, 6]);
+  assert.ok(gd.every(x => x.std === 'dim') && gw.every(x => x.std === 'weld'));
+  const all = F.goal1(pagesD, S, {});
+  assert.equal(all.length, 19);
+  const g2w = F.goal2(pagesDb, L.cleanSettings({ std: 'weld' }), {});
+  assert.ok(g2w.filter(x => x.cand).every(x => x.std === 'weld'), '용접 기준서 연결에 치수 항목이 섞임');
+});
+test('풍선 읽기: 글자 층 검사 풍선만(윤곽선 품번 풍선 12 는 뺌), 빨간 두 토막 지시선을 도면 선보다 먼저', () => {
+  const bl = L.detectBalloons(pagesDb[0], S);
+  assert.equal(bl.length, 19);
+  assert.equal(bl.filter(b => b.no === 12).length, 1);
+  // 풍선 둘레를 스치는 긴 검정 선 + 가운데서 나뉜 빨간 지시선 → 빨간 선 끝
+  const b = { cx: 100, cy: 100, r: 20 };
+  const segs = [{ x1: 60, y1: 120, x2: 300, y2: 120, color: '0,0,0' }, { x1: 100, y1: 120, x2: 100, y2: 200, color: '0,0,0' },
+    { x1: 130, y1: 70, x2: 114.1, y2: 85.9, color: '255,0,0' }, { x1: 130, y1: 70, x2: 145.9, y2: 54.1, color: '255,0,0' }];
+  const lt = L.leaderTarget(b, segs);
+  assert.ok(lt && Math.abs(lt.x - 145.9) < 0.5 && Math.abs(lt.y - 54.1) < 0.5, JSON.stringify(lt));
+  // 검정 지시선만 있을 때: 원 둘레에 닿아 옆으로 길게 지나가는 선(접선)보다 짧아도 반지름 방향으로 뻗는 선
+  const lt2 = L.leaderTarget(b, [{ x1: 100, y1: 80, x2: 260, y2: 80, color: '0,0,0' }, { x1: 114.1, y1: 114.1, x2: 128, y2: 128, color: '0,0,0' }]);
+  assert.ok(lt2 && Math.abs(lt2.x - 128) < 0.5 && Math.abs(lt2.y - 128) < 0.5, JSON.stringify(lt2));
+});
+test('수강생 방식 일치율: 필드(항목명 · 기준값 · 공차) 일치율 · 완전 일치율 — 못 찾은 행은 세 필드 모두 불일치', () => {
+  const truth = [{ no: 1, cat: '공차', kind: '길이', raw: '640 ±1', nominal: 640, upper: 1, lower: -1 }, { no: 2, cat: '공차', kind: '지름', raw: 'Ø45 +0.08/+0.02', nominal: 45, upper: 0.08, lower: 0.02 },
+    { no: 3, cat: '기하공차', kind: '평면도', raw: '▱ 1.5 CZ', upper: 1.5, lower: 0 }, { no: 4, cat: '주기', kind: '용접 부기', raw: 'DO NOT WELD #12 AREA' },
+    { no: 5, cat: '치수', kind: '지름', raw: 'Ø32', nominal: 32 }];
+  const pred = [{ no: 1, cat: '공차', kind: '길이', raw: '640 ±1', nominal: 640, upper: 1, lower: -1 }, { no: 2, cat: '공차', kind: '지름', raw: 'Ø45 +0.02', nominal: 45, upper: 0.02, lower: 0 },
+    { no: 4, cat: '주기', kind: '용접 부기', raw: 'DO NOTWELD #12AREA' }, { no: 5, cat: '치수', kind: '길이', raw: '32', nominal: 32 }];
+  const sc = L.scoreResults(pred, truth, 'number');
+  // 1 = 셋 다 맞음 · 2 = 공차 다름 · 3 = 못 찾음 · 4 = 부기 문장(띄어쓰기 · 기호 무시) 맞음 · 5 = 항목명(지름 ↔ 길이)만 다름
+  assert.deepEqual(sc.fieldRate, { name: 0.6, base: 0.8, tol: 0.6 });
+  assert.equal(sc.fullRate, 0.4); assert.equal(sc.fullCount, 2);
+  assert.equal(sc.exact, 3);
+});
+
+section('예시 도면 4종 — 전체 흐름(pdf.js)');
 test('정답 엑셀과 js 안 정답이 같음', () => {
   for (const d of Sample.drawings) {
     const fromXlsx = M.readTruth(path.join(root, 'samples', d.name + '_정답.xlsx'));
